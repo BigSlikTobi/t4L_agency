@@ -13,6 +13,7 @@ __pycache__/
 var/
 *.sqlite3
 *.json
+supabase/.temp/
 
 # Distribution / packaging
 node_modules/
