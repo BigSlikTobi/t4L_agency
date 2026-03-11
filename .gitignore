@@ -1,0 +1,23 @@
+
+.pytest_cache/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.DS_Store
+
+# Local data and logs
+var/
+*.sqlite3
+*.json
+supabase/.temp/
+
+# Distribution / packaging
+node_modules/
+.egg-info/
+*.egg-info/
+dist/
+build/
