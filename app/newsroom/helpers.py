@@ -20,6 +20,8 @@ from app.newsroom.context import NewsroomRunContext, TeamUpdateRunContext
 from app.schemas import (
     ArticleDigest,
     FeedStory,
+    HourlyNarrativePlan,
+    HourlyNarrativePlannerInput,
     GeminiTTSBatchCreateRequest,
     GeminiTTSCredentials,
     GeminiTTSBatchItem,
@@ -29,6 +31,7 @@ from app.schemas import (
     HourlyPlaylistHistoryEntry,
     HourlyPlaylistScriptsBatchAgentResult,
     RadioRundown,
+    RadioNarrativeContext,
     RadioRundownDraft,
     RadioStoryScript,
     RadioStoryScriptWriterInput,
@@ -109,7 +112,7 @@ def build_orchestrator_input(
     }
     return (
         "Create the final NFL radio rundown from these selected teams.\n\n"
-        f"Input JSON:\n{json.dumps(payload, indent=2)}"
+        f"Input JSON:\n{json.dumps(payload, separators=(',', ':'))}"
     )
 
 
@@ -187,6 +190,18 @@ def capture_source_usage(
             seen_story_ids.add(source.story_id)
 
 
+def _compact_candidate(candidate: TeamUpdateCandidate) -> dict:
+    data = candidate.model_dump(
+        mode="json",
+        exclude_none=True,
+        exclude={"recent_group_updates"},
+    )
+    data["recent_group_update_count"] = len(candidate.recent_group_updates)
+    if candidate.recent_group_updates:
+        data["latest_group_update_at"] = candidate.recent_group_updates[0].added_at.isoformat()
+    return data
+
+
 def build_team_update_input(
     context: TeamUpdateRunContext,
     team_name: str,
@@ -196,11 +211,11 @@ def build_team_update_input(
         "team_code": context.request.team,
         "team_name": team_name,
         "lookback_minutes": context.request.lookback_minutes,
-        "candidate_stories": [candidate.model_dump(mode="json") for candidate in candidate_stories],
+        "candidate_stories": [_compact_candidate(candidate) for candidate in candidate_stories],
     }
     return (
         "Create a 3-minute NFL team update report from these vetted candidate stories.\n\n"
-        f"Input JSON:\n{json.dumps(payload, indent=2)}"
+        f"Input JSON:\n{json.dumps(payload, separators=(',', ':'))}"
     )
 
 
@@ -215,7 +230,7 @@ def build_team_update_batch_input(
     }
     return (
         "Create team update reports for these selected teams in one batch.\n\n"
-        f"Input JSON:\n{json.dumps(payload, indent=2)}"
+        f"Input JSON:\n{json.dumps(payload, separators=(',', ':'))}"
     )
 
 
@@ -237,7 +252,7 @@ def build_hourly_playlist_input(
                 "framing": topic.framing,
                 "continuity": topic.continuity,
                 "synopsis": " ".join(part for part in synopsis_parts if part),
-                "source_articles": [article.model_dump(mode="json") for article in report.report.source_articles],
+                "source_articles": [article.model_dump(mode="json", exclude_none=True) for article in report.report.source_articles],
             }
         )
     payload = {
@@ -246,7 +261,7 @@ def build_hourly_playlist_input(
     }
     return (
         "Select the final hourly production playlist from these team update reports.\n\n"
-        f"Input JSON:\n{json.dumps(payload, indent=2)}"
+        f"Input JSON:\n{json.dumps(payload, separators=(',', ':'))}"
     )
 
 
@@ -256,11 +271,13 @@ def build_hourly_script_batch_input(
     *,
     language: str = DEFAULT_SCRIPT_LANGUAGE,
     personas: list[ScriptPersona],
+    hour_narrative_brief: str = "",
 ) -> str:
     payload = HourlyScriptBatchInput(
         playlist_id=playlist.id,
         batch_run_id=playlist.batch_run_id,
         language=language,
+        hour_narrative_brief=hour_narrative_brief,
         persona_roster=[
             {
                 "name": str(persona["name"]),
@@ -271,10 +288,30 @@ def build_hourly_script_batch_input(
             for persona in personas
         ],
         selected_stories=selected_stories,
-    ).model_dump(mode="json")
+    ).model_dump(mode="json", exclude_defaults=True)
     return (
         "Write radio scripts for the selected hourly playlist stories.\n\n"
-        f"Input JSON:\n{json.dumps(payload, indent=2)}"
+        f"Input JSON:\n{json.dumps(payload, separators=(',', ':'))}"
+    )
+
+
+def build_hourly_narrative_planner_input(
+    playlist: HourlyPlaylistHistoryEntry,
+    selected_stories: list[RadioStoryScriptInput],
+    *,
+    language: str = DEFAULT_SCRIPT_LANGUAGE,
+    prior_narrative_plan: HourlyNarrativePlan | None = None,
+) -> str:
+    payload = HourlyNarrativePlannerInput(
+        playlist_id=playlist.id,
+        batch_run_id=playlist.batch_run_id,
+        language=language,
+        selected_stories=selected_stories,
+        prior_narrative_plan=prior_narrative_plan,
+    ).model_dump(mode="json", exclude_defaults=True)
+    return (
+        "Plan the narrative arc for this saved hourly playlist before script writing.\n\n"
+        f"Input JSON:\n{json.dumps(payload, separators=(',', ':'))}"
     )
 
 
@@ -319,13 +356,62 @@ def build_radio_script_story_inputs(
     return sorted(story_inputs, key=lambda item: item.playlist_rank)
 
 
+def apply_hourly_narrative_plan(
+    selected_stories: list[RadioStoryScriptInput],
+    narrative_plan: HourlyNarrativePlan,
+) -> list[RadioStoryScriptInput]:
+    if not selected_stories:
+        return []
+
+    plan_by_rank = {
+        segment.playlist_rank: segment
+        for segment in narrative_plan.segments
+    }
+    if set(plan_by_rank) != {story.playlist_rank for story in selected_stories}:
+        raise ValueError("Narrative plan ranks did not match the selected hourly playlist stories.")
+
+    enriched_stories: list[RadioStoryScriptInput] = []
+    for story in selected_stories:
+        segment_plan = plan_by_rank[story.playlist_rank]
+        enriched_stories.append(
+            story.model_copy(
+                update={
+                    "narrative_context": RadioNarrativeContext(
+                        segment_kind=segment_plan.segment_kind,
+                        segment_role=segment_plan.segment_role,
+                        hour_theme=narrative_plan.hour_theme,
+                        hour_narrative_brief=narrative_plan.hour_narrative_brief,
+                        story_thread=segment_plan.story_thread,
+                        primary_angle=segment_plan.primary_angle,
+                        callback_budget=segment_plan.callback_budget,
+                        already_aired_summary=segment_plan.already_aired_summary,
+                        facts_already_aired=segment_plan.facts_already_aired,
+                        fresh_material_to_emphasize=segment_plan.fresh_material_to_emphasize,
+                        previous_segment_headline=segment_plan.previous_segment_headline,
+                        previous_segment_takeaway=segment_plan.previous_segment_takeaway,
+                        handoff_in=segment_plan.handoff_in,
+                        handoff_out=segment_plan.handoff_out,
+                        next_segment_headline=segment_plan.next_segment_headline,
+                        next_segment_tease=segment_plan.next_segment_tease,
+                    ),
+                    "story_synopsis": " ".join(
+                        part
+                        for part in [story.story_synopsis, segment_plan.narrative_focus]
+                        if part
+                    ),
+                }
+            )
+        )
+    return enriched_stories
+
+
 def build_radio_script_input(
     story_input: RadioStoryScriptWriterInput,
 ) -> str:
-    payload = story_input.model_dump(mode="json")
+    payload = story_input.model_dump(mode="json", exclude_defaults=True)
     return (
         "Write one single-anchor radio script for this hourly playlist story.\n\n"
-        f"Input JSON:\n{json.dumps(payload, indent=2)}"
+        f"Input JSON:\n{json.dumps(payload, separators=(',', ':'))}"
     )
 
 

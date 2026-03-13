@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>T4L QA Player</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f3f0e7;
+        --panel: #fffdfa;
+        --ink: #1f1e1a;
+        --muted: #6d675d;
+        --accent: #bf3b16;
+        --accent-soft: #f5d9cf;
+        --line: #d9d0c4;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background:
+          radial-gradient(circle at top left, #fff6e8, transparent 28rem),
+          linear-gradient(180deg, #f5f1e8 0%, var(--bg) 100%);
+        color: var(--ink);
+      }
+
+      main {
+        width: min(56rem, calc(100vw - 2rem));
+        margin: 0 auto;
+        padding: 2rem 0 3rem;
+      }
+
+      .panel {
+        background: rgba(255, 253, 250, 0.92);
+        border: 1px solid var(--line);
+        border-radius: 1.25rem;
+        padding: 1.25rem;
+        box-shadow: 0 1rem 2.5rem rgba(57, 44, 25, 0.08);
+        backdrop-filter: blur(10px);
+      }
+
+      h1 {
+        margin: 0 0 0.35rem;
+        font-size: clamp(1.8rem, 4vw, 2.8rem);
+        letter-spacing: -0.03em;
+      }
+
+      p,
+      li,
+      button,
+      span {
+        font-size: 0.96rem;
+      }
+
+      .lede {
+        color: var(--muted);
+        margin: 0 0 1.2rem;
+      }
+
+      .controls {
+        display: flex;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+        margin: 1rem 0 0.75rem;
+      }
+
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 0.8rem 1.15rem;
+        background: var(--accent);
+        color: white;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      button.secondary {
+        background: var(--accent-soft);
+        color: var(--ink);
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      audio {
+        width: 100%;
+        margin-top: 0.4rem;
+      }
+
+      .status {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        flex-wrap: wrap;
+        margin: 1rem 0 0;
+        color: var(--muted);
+      }
+
+      ol {
+        list-style: none;
+        padding: 0;
+        margin: 1rem 0 0;
+      }
+
+      li {
+        border-top: 1px solid var(--line);
+        padding: 0.9rem 0;
+      }
+
+      li:first-child {
+        border-top: 0;
+      }
+
+      .item-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        align-items: baseline;
+      }
+
+      .item-rank {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 1.8rem;
+        height: 1.8rem;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-weight: 700;
+        margin-right: 0.75rem;
+        flex: none;
+      }
+
+      .item-title {
+        display: flex;
+        align-items: center;
+        font-weight: 700;
+      }
+
+      .item-meta {
+        color: var(--muted);
+        font-size: 0.86rem;
+        margin-top: 0.35rem;
+      }
+
+      .current {
+        color: var(--accent);
+      }
+
+      .empty {
+        margin-top: 1rem;
+        padding: 1rem;
+        border-radius: 1rem;
+        background: #fff8f0;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="panel">
+        <h1>QA Radio Player</h1>
+        <p class="lede">Loads the latest generated scripts and plays them as one simple stream for review.</p>
+        <div class="controls">
+          <button id="play-button">Play Stream</button>
+          <button id="stop-button" class="secondary">Stop</button>
+          <button id="reload-button" class="secondary">Reload Feed</button>
+        </div>
+        <audio id="audio-player" controls preload="none"></audio>
+        <div class="status">
+          <span id="feed-source">Loading feed...</span>
+          <span id="playback-mode"></span>
+          <span id="now-playing"></span>
+        </div>
+        <div id="empty-state" class="empty" hidden>No generated scripts found yet.</div>
+        <ol id="queue"></ol>
+      </section>
+    </main>
+    <script>
+      const audio = document.getElementById("audio-player");
+      const playButton = document.getElementById("play-button");
+      const stopButton = document.getElementById("stop-button");
+      const reloadButton = document.getElementById("reload-button");
+      const feedSource = document.getElementById("feed-source");
+      const playbackMode = document.getElementById("playback-mode");
+      const nowPlaying = document.getElementById("now-playing");
+      const queue = document.getElementById("queue");
+      const emptyState = document.getElementById("empty-state");
+
+      let feed = null;
+      let currentIndex = -1;
+      let currentUtterance = null;
+
+      async function loadFeed() {
+        stopStream();
+        const params = new URLSearchParams(window.location.search);
+        const selectedBatch = params.get("batch");
+        const feedUrl = new URL("/qa/player-feed", window.location.origin);
+        if (selectedBatch) {
+          feedUrl.searchParams.set("batch", selectedBatch);
+        }
+        const response = await fetch(feedUrl.toString(), { cache: "no-store" });
+        feed = await response.json();
+        currentIndex = -1;
+        renderFeed();
+      }
+
+      function renderFeed() {
+        queue.innerHTML = "";
+        emptyState.hidden = feed.items.length > 0;
+        feedSource.textContent = `Source: ${feed.source}`;
+        playbackMode.textContent = feed.has_audio ? "Playback: TTS audio stream" : "Playback: browser speech synthesis";
+        nowPlaying.textContent = "";
+
+        feed.items.forEach((item, index) => {
+          const row = document.createElement("li");
+          row.dataset.index = String(index);
+          row.innerHTML = `
+            <div class="item-head">
+              <div>
+                <div class="item-title">
+                  <span class="item-rank">${item.playlist_rank}</span>
+                  <span>${escapeHtml(item.title)}</span>
+                </div>
+                <div class="item-meta">${escapeHtml(item.team || "Unknown team")} · ${item.audio_url ? "audio" : "speech"} · ${escapeHtml(item.voice_name || "default voice")}</div>
+              </div>
+            </div>
+          `;
+          queue.appendChild(row);
+        });
+      }
+
+      function markCurrent(index) {
+        queue.querySelectorAll("li").forEach((item) => item.classList.remove("current"));
+        const active = queue.querySelector(`li[data-index="${index}"]`);
+        if (active) {
+          active.classList.add("current");
+        }
+      }
+
+      async function playStream() {
+        if (!feed || feed.items.length === 0) {
+          return;
+        }
+        if (currentIndex === -1) {
+          await playItem(0);
+          return;
+        }
+        if (audio.src && audio.paused) {
+          await audio.play();
+          return;
+        }
+        if (!audio.src && currentUtterance === null) {
+          await playItem(currentIndex);
+        }
+      }
+
+      async function playItem(index) {
+        if (!feed || index >= feed.items.length) {
+          nowPlaying.textContent = "Playback finished";
+          currentIndex = -1;
+          markCurrent(-1);
+          return;
+        }
+
+        stopPlaybackOnly();
+        currentIndex = index;
+        const item = feed.items[index];
+        markCurrent(index);
+        nowPlaying.textContent = `Now playing: ${item.playlist_rank}. ${item.title}`;
+
+        if (item.audio_url) {
+          audio.src = item.audio_url;
+          audio.hidden = false;
+          await audio.play();
+          return;
+        }
+
+        audio.removeAttribute("src");
+        audio.load();
+        audio.hidden = true;
+        const utterance = new SpeechSynthesisUtterance(item.script_text || [item.intro, item.body, item.outro].join(" "));
+        utterance.onend = () => {
+          currentUtterance = null;
+          playItem(index + 1);
+        };
+        utterance.onerror = () => {
+          currentUtterance = null;
+          playItem(index + 1);
+        };
+        currentUtterance = utterance;
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(utterance);
+      }
+
+      function stopPlaybackOnly() {
+        if (currentUtterance) {
+          window.speechSynthesis.cancel();
+          currentUtterance = null;
+        }
+        audio.pause();
+      }
+
+      function stopStream() {
+        stopPlaybackOnly();
+        audio.removeAttribute("src");
+        audio.load();
+        audio.hidden = false;
+        currentIndex = -1;
+        nowPlaying.textContent = "";
+        markCurrent(-1);
+      }
+
+      function escapeHtml(text) {
+        return String(text)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      audio.addEventListener("ended", () => {
+        playItem(currentIndex + 1);
+      });
+
+      playButton.addEventListener("click", () => {
+        playStream();
+      });
+      stopButton.addEventListener("click", () => {
+        stopStream();
+      });
+      reloadButton.addEventListener("click", () => {
+        loadFeed();
+      });
+
+      loadFeed();
+    </script>
+  </body>
+</html>

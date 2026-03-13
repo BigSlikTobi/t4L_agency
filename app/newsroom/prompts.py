@@ -15,6 +15,7 @@ REQUIRED_PROMPTS = {
     "team_update_agent",
     "team_update_batch_agent",
     "hourly_playlist_orchestrator_agent",
+    "hourly_narrative_planner_agent",
     "radio_script_writer_agent",
     "radio_script_writer_agent_de_de",
     "hourly_script_batch_agent",

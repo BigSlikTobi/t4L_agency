@@ -31,6 +31,7 @@ from app.constants import (
 from app.history import TeamUpdateHistoryStore
 from app.newsroom.agents import (
     build_article_data_agent,
+    build_hourly_narrative_planner_agent,
     build_hourly_playlist_orchestrator_agent,
     build_hourly_script_batch_agent,
     build_radio_script_writer_agent,
@@ -39,8 +40,11 @@ from app.newsroom.agents import (
 )
 from app.newsroom.context import TeamUpdateRunContext
 from app.newsroom.helpers import (
+    _compact_candidate,
+    apply_hourly_narrative_plan,
     build_tts_batch_create_request,
     build_tts_batch_process_request,
+    build_hourly_narrative_planner_input,
     build_hourly_script_batch_input,
     build_radio_script_story_inputs,
     build_hourly_playlist_input,
@@ -63,6 +67,7 @@ from app.schemas import (
     GeminiTTSBatchJobStatus,
     GeminiTTSBatchStatusRequest,
     GeminiTTSCredentials,
+    HourlyNarrativePlan,
     HourlyPlaylist,
     HourlyPlaylistItem,
     HourlyPlaylistSelection,
@@ -73,6 +78,7 @@ from app.schemas import (
     RadioStoryScriptDraft,
     ScriptDirectionPronunciation,
     StoryGroupUpdatesToolResponse,
+    TeamUpdateBatchAgentReport,
     TeamUpdateBatchAgentResult,
     TeamUpdateBatchRequest,
     TeamUpdateBatchResponse,
@@ -81,7 +87,6 @@ from app.schemas import (
     TeamUpdatePackage,
     TeamUpdateReport,
     TeamUpdateReportRequest,
-    TeamUpdateTeamInput,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,6 +106,7 @@ _TTS_TERMINAL_FAILURE_STATES: Final[frozenset[str]] = frozenset(
 class ScriptGenerationStack:
     language: str
     personas: list[ScriptPersona]
+    hourly_narrative_planner_agent: Agent
     radio_script_writer_agent: Agent
     radio_story_script_tool: FunctionTool
     hourly_script_batch_agent: Agent
@@ -147,6 +153,7 @@ class TeamUpdateWorkflow:
             for language in SCRIPT_LANGUAGE_CONFIGS
         }
         default_script_stack = self.script_generation_stacks[DEFAULT_SCRIPT_LANGUAGE]
+        self.hourly_narrative_planner_agent = default_script_stack.hourly_narrative_planner_agent
         self.radio_script_writer_agent = default_script_stack.radio_script_writer_agent
         self.radio_story_script_tool = default_script_stack.radio_story_script_tool
         self.hourly_script_batch_agent = default_script_stack.hourly_script_batch_agent
@@ -203,6 +210,7 @@ class TeamUpdateWorkflow:
                 },
             ),
             max_turns=max(6, len(context.candidate_stories) + 2),
+            auto_previous_response_id=True,
         )
         package = coerce_output(result.final_output, TeamUpdatePackage)
         report = TeamUpdateReport(
@@ -253,30 +261,44 @@ class TeamUpdateWorkflow:
             context.feed_stories = list(feed_stories)
             await self._prepare_team_context(context, skip_feed_fetch=True)
             team_contexts.append(context)
-            selected_team_payloads.append(
-                TeamUpdateTeamInput(
-                    team_code=team_code,
-                    team_name=str(NFL_TEAMS[team_code]["name"]),
-                    lookback_minutes=request.lookback_minutes,
-                    candidate_stories=context.candidate_stories,
-                ).model_dump(mode="json")
-            )
+            selected_team_payloads.append({
+                "team_code": team_code,
+                "team_name": str(NFL_TEAMS[team_code]["name"]),
+                "lookback_minutes": request.lookback_minutes,
+                "candidate_stories": [
+                    _compact_candidate(candidate)
+                    for candidate in context.candidate_stories
+                ],
+            })
 
         logger.info(
             "Running team update batch agent",
             extra={"run_id": run_id, "team_count": len(team_contexts)},
         )
-        result = await Runner.run(
-            self.team_update_batch_agent,
-            build_team_update_batch_input(run_id, request, selected_team_payloads),
-            run_config=build_run_config(
-                run_id,
-                stage="team_update_batch_agent",
-                metadata={"team_count": str(len(team_contexts))},
-            ),
-            max_turns=max(8, len(team_contexts) + 4),
-        )
-        batch_output = coerce_output(result.final_output, TeamUpdateBatchAgentResult)
+        chunk_size = self._settings.team_update_batch_chunk_size
+        all_batch_reports: list[object] = []
+        for chunk_index in range(0, len(selected_team_payloads), chunk_size):
+            chunk = selected_team_payloads[chunk_index : chunk_index + chunk_size]
+            chunk_result = await Runner.run(
+                self.team_update_batch_agent,
+                build_team_update_batch_input(run_id, request, chunk),
+                run_config=build_run_config(
+                    run_id,
+                    stage="team_update_batch_agent",
+                    metadata={
+                        "team_count": str(len(chunk)),
+                        "chunk": f"{chunk_index // chunk_size + 1}",
+                    },
+                ),
+                max_turns=max(8, len(chunk) + 4),
+                auto_previous_response_id=True,
+            )
+            chunk_output = _validate_team_update_batch_reports(
+                coerce_output(chunk_result.final_output, TeamUpdateBatchAgentResult),
+                selected_team_payloads=chunk,
+            )
+            all_batch_reports.extend(chunk_output.reports)
+        batch_output = TeamUpdateBatchAgentResult(reports=all_batch_reports)
 
         context_by_team = {context.request.team: context for context in team_contexts}
         reports: list[TeamUpdateReport] = []
@@ -573,6 +595,7 @@ class TeamUpdateWorkflow:
                 metadata={"eligible_report_count": str(len(eligible_reports))},
             ),
             max_turns=6,
+            auto_previous_response_id=True,
         )
         playlist_selection = coerce_output(result.final_output, HourlyPlaylistSelection)
         playlist = _validate_hourly_playlist_selection(playlist_selection, eligible_reports)
@@ -628,26 +651,100 @@ class TeamUpdateWorkflow:
                 scripts=[],
             )
 
-        result = await Runner.run(
-            script_stack.hourly_script_batch_agent,
-            build_hourly_script_batch_input(
-                playlist_entry,
-                selected_stories,
-                language=request.language,
-                personas=script_stack.personas,
-            ),
-            run_config=build_run_config(
-                script_run_id,
-                stage="hourly_script_batch_agent",
-                metadata={
-                    "language": request.language,
-                    "playlist_id": playlist_entry.id,
-                    "story_count": str(len(selected_stories)),
-                },
-            ),
-            max_turns=max(6, len(selected_stories) + 2),
+        # The narrative plan is language-independent (story order, angles,
+        # handoffs).  If another language already produced one for this exact
+        # playlist we reuse it instead of burning another planner call.
+        reusable_entries = self._history_store.list_hourly_narrative_plans(
+            playlist_id=playlist_entry.id,
         )
-        batch_output = coerce_output(result.final_output, HourlyPlaylistScriptsBatchAgentResult)
+        reusable_entry = next(
+            (e for e in reusable_entries if e.playlist_id == playlist_entry.id),
+            None,
+        )
+
+        if reusable_entry is not None:
+            narrative_plan = HourlyNarrativePlan.model_validate(
+                reusable_entry.narrative_plan_json,
+            )
+            logger.info(
+                "Reusing existing narrative plan for playlist",
+                extra={
+                    "playlist_id": playlist_entry.id,
+                    "source_language": reusable_entry.language,
+                    "target_language": request.language,
+                },
+            )
+        else:
+            prior_narrative_entry = self._history_store.get_latest_hourly_narrative_plan(
+                playlist_id=playlist_entry.id,
+                language=request.language,
+            )
+            prior_narrative_plan = (
+                HourlyNarrativePlan.model_validate(prior_narrative_entry.narrative_plan_json)
+                if prior_narrative_entry is not None
+                else None
+            )
+            narrative_result = await Runner.run(
+                script_stack.hourly_narrative_planner_agent,
+                build_hourly_narrative_planner_input(
+                    playlist_entry,
+                    selected_stories,
+                    language=request.language,
+                    prior_narrative_plan=prior_narrative_plan,
+                ),
+                run_config=build_run_config(
+                    script_run_id,
+                    stage="hourly_narrative_planner_agent",
+                    metadata={
+                        "language": request.language,
+                        "playlist_id": playlist_entry.id,
+                        "story_count": str(len(selected_stories)),
+                    },
+                ),
+                max_turns=6,
+                auto_previous_response_id=True,
+            )
+            narrative_plan = coerce_output(narrative_result.final_output, HourlyNarrativePlan)
+
+        self._history_store.save_hourly_narrative_plan(
+            script_run_id=script_run_id,
+            playlist_id=playlist_entry.id,
+            batch_run_id=playlist_entry.batch_run_id,
+            language=request.language,
+            generated_at=generated_at,
+            narrative_plan=narrative_plan,
+        )
+        selected_stories = apply_hourly_narrative_plan(selected_stories, narrative_plan)
+
+        script_chunk_size = self._settings.script_batch_chunk_size
+        all_script_drafts: list[RadioStoryScriptDraft] = []
+        for chunk_index in range(0, len(selected_stories), script_chunk_size):
+            story_chunk = selected_stories[chunk_index : chunk_index + script_chunk_size]
+            chunk_result = await Runner.run(
+                script_stack.hourly_script_batch_agent,
+                build_hourly_script_batch_input(
+                    playlist_entry,
+                    story_chunk,
+                    language=request.language,
+                    personas=script_stack.personas,
+                    hour_narrative_brief=narrative_plan.hour_narrative_brief,
+                ),
+                run_config=build_run_config(
+                    script_run_id,
+                    stage="hourly_script_batch_agent",
+                    metadata={
+                        "language": request.language,
+                        "playlist_id": playlist_entry.id,
+                        "story_count": str(len(story_chunk)),
+                        "chunk": f"{chunk_index // script_chunk_size + 1}",
+                    },
+                ),
+                max_turns=max(6, len(story_chunk) + 2),
+                auto_previous_response_id=True,
+            )
+            chunk_output = coerce_output(chunk_result.final_output, HourlyPlaylistScriptsBatchAgentResult)
+            all_script_drafts.extend(chunk_output.scripts)
+        batch_output = HourlyPlaylistScriptsBatchAgentResult(scripts=all_script_drafts)
         scripts = _normalize_radio_story_scripts(
             batch_output.scripts,
             selected_stories,
@@ -691,6 +788,14 @@ class TeamUpdateWorkflow:
             if language == DEFAULT_SCRIPT_LANGUAGE
             else f"Hourly Script Batch Agent ({language})"
         )
+        narrative_planner_agent = build_hourly_narrative_planner_agent(
+            settings,
+            agent_name=(
+                "Hourly Narrative Planner Agent"
+                if language == DEFAULT_SCRIPT_LANGUAGE
+                else f"Hourly Narrative Planner Agent ({language})"
+            ),
+        )
         radio_script_writer_agent = build_radio_script_writer_agent(
             settings,
             article_data_tool=self.article_data_tool,
@@ -711,6 +816,7 @@ class TeamUpdateWorkflow:
         return ScriptGenerationStack(
             language=language,
             personas=list(config["personas"]),
+            hourly_narrative_planner_agent=narrative_planner_agent,
             radio_script_writer_agent=radio_script_writer_agent,
             radio_story_script_tool=radio_story_script_tool,
             hourly_script_batch_agent=hourly_script_batch_agent,
@@ -1076,6 +1182,63 @@ def _validate_hourly_playlist_selection(
             )
         )
     return HourlyPlaylist(selected_count=len(normalized_items), items=normalized_items)
+
+
+def _validate_team_update_batch_reports(
+    batch_result: TeamUpdateBatchAgentResult,
+    *,
+    selected_team_payloads: list[dict[str, object]],
+) -> TeamUpdateBatchAgentResult:
+    expected_teams = [str(payload["team_code"]) for payload in selected_team_payloads]
+    reports_by_team: dict[str, TeamUpdateBatchAgentReport] = {}
+
+    for report in batch_result.reports:
+        if report.team in reports_by_team:
+            raise ValueError(f"Batch agent returned duplicate report entry for team {report.team}.")
+        if report.team not in expected_teams:
+            raise ValueError(f"Batch agent returned unexpected team {report.team}.")
+        reports_by_team[report.team] = report
+
+    missing_teams = [team for team in expected_teams if team not in reports_by_team]
+    if missing_teams:
+        raise ValueError(
+            "Batch agent omitted report entries for teams: "
+            + ", ".join(missing_teams)
+            + "."
+        )
+
+    normalized_reports: list[TeamUpdateBatchAgentReport] = []
+    for payload in selected_team_payloads:
+        team = str(payload["team_code"])
+        candidate_stories = payload["candidate_stories"]
+        if not isinstance(candidate_stories, list):
+            raise ValueError(f"Invalid candidate story payload for team {team}.")
+
+        report = reports_by_team[team]
+        expected_status = "report_ready" if candidate_stories else "no_update"
+        if report.status != expected_status:
+            raise ValueError(
+                f"Batch agent returned status={report.status} for team {team}; "
+                f"expected {expected_status}."
+            )
+
+        expected_lookback = int(payload["lookback_minutes"])
+        if report.lookback_minutes != expected_lookback:
+            raise ValueError(
+                f"Batch agent returned lookback_minutes={report.lookback_minutes} for team {team}; "
+                f"expected {expected_lookback}."
+            )
+
+        normalized_reports.append(
+            TeamUpdateBatchAgentReport(
+                team=team,
+                lookback_minutes=expected_lookback,
+                status=report.status,
+                report=report.report,
+            )
+        )
+
+    return TeamUpdateBatchAgentResult(reports=normalized_reports)
 
 
 def _fallback_update_from_article_timestamp(

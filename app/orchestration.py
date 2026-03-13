@@ -146,6 +146,7 @@ def build_default_orchestrator(settings: Settings) -> NewsroomOrchestrator:
     tts_batch = GeminiTTSBatchAdapter(
         endpoint_url=str(settings.gemini_tts_batch_url),
         timeout_seconds=settings.news_timeout_seconds,
+        process_timeout_seconds=settings.gemini_tts_batch_timeout_seconds,
     )
     adapters = [news_feed, article_lookup, tts_batch]
 

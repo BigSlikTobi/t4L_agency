@@ -717,6 +717,56 @@ class HourlyPlaylistScriptsResponse(BaseModel):
         )
 
 
+class QAPlayerFeedItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    title: str
+    playlist_rank: int = Field(ge=1)
+    team: str = ""
+    language: ScriptLanguage = DEFAULT_SCRIPT_LANGUAGE
+    voice_name: str = ""
+    duration_seconds: int | None = Field(default=None, ge=1, le=240)
+    audio_url: str | None = None
+    intro: str = ""
+    body: str = ""
+    outro: str = ""
+    script_text: str = ""
+
+
+class QAPlayerFeed(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["artifact", "history", "empty"]
+    generated_at: datetime | None = None
+    script_run_id: str = ""
+    playlist_id: str = ""
+    language: ScriptLanguage = DEFAULT_SCRIPT_LANGUAGE
+    has_audio: bool = False
+    items: list[QAPlayerFeedItem] = Field(default_factory=list)
+
+
+class RadioNarrativeContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    segment_kind: str = "team_story"
+    segment_role: Literal["opener", "middle", "closer", "standalone"] = "standalone"
+    hour_theme: str = ""
+    hour_narrative_brief: str = ""
+    story_thread: str = ""
+    primary_angle: str = ""
+    callback_budget: str = ""
+    already_aired_summary: str = ""
+    facts_already_aired: list[str] = Field(default_factory=list)
+    fresh_material_to_emphasize: list[str] = Field(default_factory=list)
+    previous_segment_headline: str = ""
+    previous_segment_takeaway: str = ""
+    handoff_in: str = ""
+    handoff_out: str = ""
+    next_segment_headline: str = ""
+    next_segment_tease: str = ""
+
+
 class RadioStoryScriptInput(BaseModel):
     team: str
     playlist_rank: int = Field(ge=1)
@@ -726,6 +776,7 @@ class RadioStoryScriptInput(BaseModel):
     production_reason: str
     story_synopsis: str
     source_articles: list[SourceArticleRef] = Field(default_factory=list)
+    narrative_context: RadioNarrativeContext = Field(default_factory=RadioNarrativeContext)
 
     @field_validator("team")
     @classmethod
@@ -744,6 +795,7 @@ class HourlyScriptBatchInput(BaseModel):
     playlist_id: str
     batch_run_id: str
     language: ScriptLanguage = DEFAULT_SCRIPT_LANGUAGE
+    hour_narrative_brief: str = ""
     persona_roster: list[BatchPersonaOption] = Field(default_factory=list)
     selected_stories: list[RadioStoryScriptInput] = Field(default_factory=list)
 
@@ -757,6 +809,7 @@ class RadioStoryScriptToolInput(BaseModel):
     story_synopsis: str
     source_articles: list[SourceArticleRef] = Field(default_factory=list)
     persona_name: str
+    narrative_context: RadioNarrativeContext = Field(default_factory=RadioNarrativeContext)
 
     @field_validator("team")
     @classmethod
@@ -778,6 +831,7 @@ class RadioStoryScriptWriterInput(BaseModel):
     voice_name: str
     dialect: str
     source_articles: list[SourceArticleRef] = Field(default_factory=list)
+    narrative_context: RadioNarrativeContext = Field(default_factory=RadioNarrativeContext)
 
     @field_validator("team")
     @classmethod
@@ -804,6 +858,54 @@ class RadioStoryScriptDraft(BaseModel):
 
 class HourlyPlaylistScriptsBatchAgentResult(BaseModel):
     scripts: list[RadioStoryScriptDraft] = Field(default_factory=list)
+
+
+class HourlyNarrativePlannerInput(BaseModel):
+    playlist_id: str
+    batch_run_id: str
+    language: ScriptLanguage = DEFAULT_SCRIPT_LANGUAGE
+    selected_stories: list[RadioStoryScriptInput] = Field(default_factory=list)
+    prior_narrative_plan: HourlyNarrativePlan | None = None
+
+
+class HourlyNarrativeSegmentPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    playlist_rank: int = Field(ge=1)
+    segment_kind: str = "team_story"
+    segment_role: Literal["opener", "middle", "closer", "standalone"]
+    narrative_focus: str
+    story_thread: str = ""
+    primary_angle: str = ""
+    callback_budget: str = ""
+    already_aired_summary: str = ""
+    facts_already_aired: list[str] = Field(default_factory=list)
+    fresh_material_to_emphasize: list[str] = Field(default_factory=list)
+    handoff_in: str = ""
+    handoff_out: str = ""
+    previous_segment_headline: str = ""
+    previous_segment_takeaway: str = ""
+    next_segment_headline: str = ""
+    next_segment_tease: str = ""
+
+
+class HourlyNarrativePlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    hour_theme: str
+    hour_narrative_brief: str
+    segments: list[HourlyNarrativeSegmentPlan] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_segments(self) -> "HourlyNarrativePlan":
+        if not self.segments:
+            return self
+        ranks = [segment.playlist_rank for segment in self.segments]
+        if len(set(ranks)) != len(ranks):
+            raise ValueError("hourly narrative plan ranks must be unique")
+        if sorted(ranks) != list(range(1, len(ranks) + 1)):
+            raise ValueError("hourly narrative plan ranks must be sequential starting at 1")
+        return self
 
 
 class TeamUpdateHistoryEntry(BaseModel):
@@ -841,3 +943,13 @@ class HourlyStoryScriptHistoryEntry(BaseModel):
     generated_at: datetime
     duration_seconds: int = Field(ge=1, le=240)
     script_json: dict
+
+
+class HourlyNarrativePlanHistoryEntry(BaseModel):
+    id: str
+    script_run_id: str
+    playlist_id: str
+    batch_run_id: str
+    language: ScriptLanguage = DEFAULT_SCRIPT_LANGUAGE
+    generated_at: datetime
+    narrative_plan_json: dict

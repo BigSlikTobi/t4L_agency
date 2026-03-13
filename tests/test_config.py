@@ -26,6 +26,7 @@ def test_settings_require_distinct_supabase_function_urls() -> None:
         "https://us-central1-tackle4loss-888b5.cloudfunctions.net/gemini-tts-batch"
     )
     assert settings.gemini_tts_batch_model_name == "gemini-2.5-pro-preview-tts"
+    assert settings.openai_model_team_update_batch_agent == "gpt-5-mini-2025-08-07"
     assert settings.gemini_tts_batch_poll_interval_seconds == 10.0
     assert settings.gemini_tts_batch_timeout_seconds == 900.0
     assert settings.resolved_supabase_storage_url() == "https://example.com"
