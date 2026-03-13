@@ -13,10 +13,13 @@ def build_model_settings(
     *,
     tool_choice: str | None = None,
     parallel_tool_calls: bool | None = None,
+    max_tokens: int | None = None,
 ) -> ModelSettings:
     return ModelSettings(
         temperature=settings.openai_temperature,
-        max_tokens=settings.openai_max_tokens,
+        max_tokens=max_tokens if max_tokens is not None else settings.openai_max_tokens,
         tool_choice=tool_choice,
         parallel_tool_calls=parallel_tool_calls,
+        store=True,
+        prompt_cache_retention="24h",
     )

@@ -40,14 +40,18 @@ class Settings(BaseSettings):
     openai_model_chief_editor: str = "gpt-5-mini-2025-08-07"
     openai_model_team_analyst: str = "gpt-5-mini-2025-08-07"
     openai_model_story_researcher: str = "gpt-5-mini-2025-08-07"
-    openai_model_article_data_agent: str = "gpt-5-2025-08-07"
+    openai_model_article_data_agent: str = "gpt-5-mini-2025-08-07"
     openai_model_team_news_agent: str = "gpt-5-2025-08-07"
     openai_model_rundown_orchestrator_agent: str = "gpt-5.2-2025-12-11"
     openai_model_team_update_agent: str = "gpt-5.2-2025-12-11"
-    openai_model_team_update_batch_agent: str = "gpt-5.2-2025-12-11"
+    openai_model_team_update_batch_agent: str = "gpt-5-mini-2025-08-07"
     openai_model_hourly_playlist_orchestrator_agent: str = "gpt-5.2-2025-12-11"
     openai_model_radio_script_writer_agent: str = "gpt-5.1-2025-11-13"
-    openai_model_hourly_script_batch_agent: str = "gpt-5.4-2026-03-05"
+    openai_model_hourly_narrative_planner_agent: str = "gpt-5.4-2026-03-05"
+    openai_model_hourly_script_batch_agent: str = "gpt-5-mini-2025-08-07"
+    team_update_batch_chunk_size: int = 8
+    script_batch_chunk_size: int = 5
+
     openai_temperature: float | None = None
     openai_max_tokens: int | None = None
 
@@ -94,6 +98,9 @@ class Settings(BaseSettings):
             ),
             "radio_script_writer_agent": (
                 self.openai_model_radio_script_writer_agent or self.openai_model_team_analyst
+            ),
+            "hourly_narrative_planner_agent": (
+                self.openai_model_hourly_narrative_planner_agent or self.openai_model_chief_editor
             ),
             "hourly_script_batch_agent": (
                 self.openai_model_hourly_script_batch_agent or self.openai_model_chief_editor

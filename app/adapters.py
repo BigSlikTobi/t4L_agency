@@ -169,9 +169,15 @@ class StoryGroupUpdatesAdapter:
 
 
 class GeminiTTSBatchAdapter:
-    def __init__(self, endpoint_url: str, timeout_seconds: float = 30.0) -> None:
+    def __init__(
+        self,
+        endpoint_url: str,
+        timeout_seconds: float = 30.0,
+        process_timeout_seconds: float = 300.0,
+    ) -> None:
         self._endpoint_url = endpoint_url
         self._client = httpx.AsyncClient(timeout=timeout_seconds)
+        self._process_timeout = httpx.Timeout(process_timeout_seconds)
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -198,7 +204,11 @@ class GeminiTTSBatchAdapter:
 
     @_default_retry()
     async def process_batch(self, request: GeminiTTSBatchProcessRequest) -> TTSBatchResult:
-        response = await self._client.post(self._endpoint_url, json=request.model_dump(mode="json"))
+        response = await self._client.post(
+            self._endpoint_url,
+            json=request.model_dump(mode="json"),
+            timeout=self._process_timeout,
+        )
         _check_transient(response)
         if response.status_code >= 400:
             raise ExternalServiceError(

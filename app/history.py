@@ -12,6 +12,8 @@ from uuid import uuid4
 logger = logging.getLogger(__name__)
 
 from app.schemas import (
+    HourlyNarrativePlan,
+    HourlyNarrativePlanHistoryEntry,
     HourlyPlaylist,
     HourlyPlaylistHistoryEntry,
     HourlyStoryScriptHistoryEntry,
@@ -86,6 +88,19 @@ class TeamUpdateHistoryStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS hourly_narrative_plan_history (
+                    id TEXT PRIMARY KEY,
+                    script_run_id TEXT NOT NULL,
+                    playlist_id TEXT NOT NULL,
+                    batch_run_id TEXT NOT NULL,
+                    language TEXT NOT NULL DEFAULT 'en-US',
+                    generated_at TEXT NOT NULL,
+                    narrative_plan_json TEXT NOT NULL
+                )
+                """
+            )
             self._ensure_column(connection, "team_update_history", "batch_run_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(
                 connection,
@@ -98,6 +113,12 @@ class TeamUpdateHistoryStore:
             self._ensure_column(
                 connection,
                 "hourly_story_script_history",
+                "language",
+                "TEXT NOT NULL DEFAULT 'en-US'",
+            )
+            self._ensure_column(
+                connection,
+                "hourly_narrative_plan_history",
                 "language",
                 "TEXT NOT NULL DEFAULT 'en-US'",
             )
@@ -365,6 +386,89 @@ class TeamUpdateHistoryStore:
                     ),
                 )
 
+    def save_hourly_narrative_plan(
+        self,
+        *,
+        script_run_id: str,
+        playlist_id: str,
+        batch_run_id: str,
+        language: str,
+        generated_at: datetime,
+        narrative_plan: HourlyNarrativePlan,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO hourly_narrative_plan_history (
+                    id,
+                    script_run_id,
+                    playlist_id,
+                    batch_run_id,
+                    language,
+                    generated_at,
+                    narrative_plan_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid4()),
+                    script_run_id,
+                    playlist_id,
+                    batch_run_id,
+                    language,
+                    generated_at.isoformat(),
+                    json.dumps(narrative_plan.model_dump(mode="json")),
+                ),
+            )
+
+    def list_hourly_narrative_plans(
+        self,
+        *,
+        playlist_id: str | None = None,
+        script_run_id: str | None = None,
+        language: str | None = None,
+    ) -> list[HourlyNarrativePlanHistoryEntry]:
+        query = """
+            SELECT id, script_run_id, playlist_id, batch_run_id, language, generated_at, narrative_plan_json
+            FROM hourly_narrative_plan_history
+        """
+        params: list[str] = []
+        clauses: list[str] = []
+        if playlist_id is not None:
+            clauses.append("playlist_id = ?")
+            params.append(playlist_id)
+        if script_run_id is not None:
+            clauses.append("script_run_id = ?")
+            params.append(script_run_id)
+        if language is not None:
+            clauses.append("language = ?")
+            params.append(language)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY generated_at DESC"
+
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._narrative_plan_row_to_entry(row) for row in rows]
+
+    def get_latest_hourly_narrative_plan(
+        self,
+        *,
+        playlist_id: str,
+        language: str,
+    ) -> HourlyNarrativePlanHistoryEntry | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, script_run_id, playlist_id, batch_run_id, language, generated_at, narrative_plan_json
+                FROM hourly_narrative_plan_history
+                WHERE playlist_id = ? AND language = ?
+                ORDER BY generated_at DESC
+                LIMIT 1
+                """,
+                (playlist_id, language),
+            ).fetchone()
+        return self._narrative_plan_row_to_entry(row) if row is not None else None
+
     def list_story_scripts(
         self,
         *,
@@ -391,6 +495,28 @@ class TeamUpdateHistoryStore:
         with self._connect() as connection:
             rows = connection.execute(query, params).fetchall()
         return [self._script_row_to_entry(row) for row in rows]
+
+    def get_latest_story_scripts(
+        self,
+        *,
+        language: str | None = None,
+    ) -> list[HourlyStoryScriptHistoryEntry]:
+        query = """
+            SELECT script_run_id
+            FROM hourly_story_script_history
+        """
+        params: list[str] = []
+        if language is not None:
+            query += " WHERE language = ?"
+            params.append(language)
+        query += " ORDER BY generated_at DESC LIMIT 1"
+
+        with self._connect() as connection:
+            row = connection.execute(query, params).fetchone()
+
+        if row is None:
+            return []
+        return self.list_story_scripts(script_run_id=str(row["script_run_id"]))
 
     @staticmethod
     def _ensure_column(
@@ -448,4 +574,16 @@ class TeamUpdateHistoryStore:
             generated_at=datetime.fromisoformat(str(row["generated_at"])),
             duration_seconds=int(row["duration_seconds"]),
             script_json=json.loads(str(row["script_json"])),
+        )
+
+    @staticmethod
+    def _narrative_plan_row_to_entry(row: sqlite3.Row) -> HourlyNarrativePlanHistoryEntry:
+        return HourlyNarrativePlanHistoryEntry(
+            id=str(row["id"]),
+            script_run_id=str(row["script_run_id"]),
+            playlist_id=str(row["playlist_id"]),
+            batch_run_id=str(row["batch_run_id"]),
+            language=str(row["language"] or "en-US"),
+            generated_at=datetime.fromisoformat(str(row["generated_at"])),
+            narrative_plan_json=json.loads(str(row["narrative_plan_json"])),
         )

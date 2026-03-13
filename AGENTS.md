@@ -8,7 +8,7 @@ This repository builds an NFL newsroom orchestration service on top of the OpenA
 
 The product goal is to generate a structured, producer-friendly rundown for a one-hour radio show using:
 
-- a `Web Research Agent`
+- an `Article Data Agent`
 - one reusable `Team News Agent` executed once per NFL team with injected team context
 - a final `Rundown Orchestrator Agent`
 - deterministic preprocessing and postprocessing where reliability matters
@@ -16,7 +16,7 @@ The product goal is to generate a structured, producer-friendly rundown for a on
 ## Non-Negotiables
 
 - Use the real Python `agents` package from the OpenAI Agents SDK.
-- Keep the streamlined nested chain intact: feed fetch, exact team filter, top-level orchestrator agent, reusable team agent as tool, web research agent as tool.
+- Keep the streamlined nested chain intact: feed fetch, exact team filter, top-level orchestrator agent, reusable team agent as tool, article data agent as tool.
 - Do not reintroduce a complex chief-editor tool loop unless the user explicitly asks for it.
 - Keep outputs structured and schema-first.
 - Preserve the public API and CLI contracts unless the user explicitly asks to change them.
@@ -26,6 +26,8 @@ The product goal is to generate a structured, producer-friendly rundown for a on
 
 ## Expected Architecture
 
+- `agents_doc.md`
+  - living inventory of every real agent, its tool/model/prompt wiring, and workflow handoffs/guardrails
 - `app/newsroom/prompts.yml`
   - prompt text only
 - `app/newsroom/prompts.py`
@@ -49,6 +51,7 @@ The product goal is to generate a structured, producer-friendly rundown for a on
 
 ## Implementation Rules
 
+- When agent structure changes, update `agents_doc.md` in the same patch. This includes agent additions/removals, prompt key changes, tool wiring changes, model mapping changes, runtime variants, handoff changes, and guardrail changes that alter effective agent behavior.
 - Prefer deterministic Python logic for:
   - exact team entity filtering
   - source deduplication

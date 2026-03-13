@@ -20,6 +20,8 @@ from app.schemas import (
     TeamUpdateBatchRequest,
     TeamUpdateReportRequest,
 )
+from app.adapters import GeminiTTSBatchAdapter
+from app.newsroom.helpers import build_tts_batch_process_request
 
 configure_logging()
 
@@ -150,6 +152,25 @@ def run_write_scripts(
     if output_json is not None:
         output_json.write_text(serialized, encoding="utf-8")
         typer.echo(f"Wrote JSON to {output_json}", err=True)
+
+
+@app.command("process-tts")
+def run_process_tts(
+    batch_id: str = typer.Option(
+        ...,
+        "--batch-id",
+        help="Batch ID from a previous TTS batch creation.",
+    ),
+) -> None:
+    """Process an already-created TTS batch: download audio from Gemini and upload to Supabase Storage."""
+    settings = get_settings()
+    tts_batch = GeminiTTSBatchAdapter(
+        endpoint_url=str(settings.gemini_tts_batch_url),
+        process_timeout_seconds=settings.gemini_tts_batch_timeout_seconds,
+    )
+    request = build_tts_batch_process_request(batch_id=batch_id, settings=settings)
+    result = asyncio.run(tts_batch.process_batch(request))
+    typer.echo(json.dumps(result.model_dump(mode="json"), indent=2, ensure_ascii=False))
 
 
 def _parse_team_update_targets(raw_teams: list[str] | None) -> list[str]:

@@ -4,9 +4,10 @@ from datetime import UTC, datetime
 
 import pytest
 
+from app.adapters import GeminiTTSBatchAdapter
 from app.config import Settings
 from app.newsroom.context import NewsroomRunContext
-from app.orchestration import NewsroomOrchestrator
+from app.orchestration import NewsroomOrchestrator, build_default_orchestrator
 from app.schemas import (
     ArticleDigest,
     FeedStory,
@@ -322,6 +323,30 @@ def build_settings() -> Settings:
         supabase_function_auth_token="supabase-token",
         supabase_storage_key="storage-key",
     )
+
+
+@pytest.mark.asyncio
+async def test_default_orchestrator_uses_tts_batch_timeout_for_process_requests() -> None:
+    settings = Settings(
+        openai_api_key="sk-test",
+        supabase_news_feed_url="https://example.com/feed",
+        supabase_article_lookup_url="https://example.com/article-lookup",
+        supabase_story_group_updates_url="https://example.com/story-group-updates",
+        supabase_function_auth_token="supabase-token",
+        supabase_storage_key="storage-key",
+        gemini_tts_batch_timeout_seconds=777.0,
+    )
+    orchestrator = build_default_orchestrator(settings)
+
+    try:
+        tts_adapter = next(
+            adapter
+            for adapter in orchestrator._adapters
+            if isinstance(adapter, GeminiTTSBatchAdapter)
+        )
+        assert tts_adapter._process_timeout.read == 777.0
+    finally:
+        await orchestrator.close()
 
 
 @pytest.mark.asyncio

@@ -88,6 +88,7 @@ class AgentsWorkflow:
                 metadata={"team_count": str(len(selected_team_payloads))},
             ),
             max_turns=max(8, len(selected_team_payloads) + 4),
+            auto_previous_response_id=True,
         )
         draft = coerce_output(result.final_output, RadioRundownDraft)
         public_rundown = build_public_rundown(draft=draft, request=context.request)

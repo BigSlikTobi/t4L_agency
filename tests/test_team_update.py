@@ -12,15 +12,17 @@ from typer.testing import CliRunner
 from app.cli import app as cli_app
 from app.history import TeamUpdateHistoryStore
 from app.newsroom.context import TeamUpdateRunContext
-from app.newsroom.helpers import build_hourly_script_batch_input
+from app.newsroom.helpers import apply_hourly_narrative_plan, build_hourly_script_batch_input
 from app.newsroom.workflow import TeamUpdateWorkflow
 from app.schemas import (
     ArticleContentLookupToolResponse,
     FeedStory,
+    HourlyNarrativePlan,
     HourlyPlaylist,
     HourlyPlaylistItem,
     HourlyPlaylistScriptsRequest,
     HourlyPlaylistScriptsResponse,
+    RadioNarrativeContext,
     RadioStoryScript,
     RadioStoryScriptInput,
     SourceArticleRef,
@@ -337,6 +339,39 @@ def make_radio_story_script(
     )
 
 
+def make_narrative_plan_output(*, story_count: int = 1) -> dict:
+    roles = ["standalone"] if story_count == 1 else ["opener", *["middle"] * max(0, story_count - 2), "closer"]
+    segments = []
+    for index in range(story_count):
+        rank = index + 1
+        story_thread = "shared-event-thread" if story_count >= 3 and rank in {1, 3} else f"story-thread-{rank}"
+        segments.append(
+            {
+                "playlist_rank": rank,
+                "segment_kind": "team_story",
+                "segment_role": roles[index],
+                "narrative_focus": f"Focus for rank {rank}",
+                "story_thread": story_thread,
+                "primary_angle": f"Primary angle for rank {rank}",
+                "callback_budget": "" if rank == 1 else "One brief callback sentence max.",
+                "already_aired_summary": "" if rank == 1 else f"Listener already heard the core event before rank {rank}.",
+                "facts_already_aired": [] if rank == 1 else [f"Already aired fact for rank {rank}"],
+                "fresh_material_to_emphasize": [f"Fresh detail for rank {rank}"],
+                "handoff_in": "" if rank == 1 else f"Pick up from rank {rank - 1}",
+                "handoff_out": "" if rank == story_count else f"Tee up rank {rank + 1}",
+                "previous_segment_headline": "" if rank == 1 else f"Headline {rank - 1}",
+                "previous_segment_takeaway": "" if rank == 1 else f"Takeaway {rank - 1}",
+                "next_segment_headline": "" if rank == story_count else f"Headline {rank + 1}",
+                "next_segment_tease": "" if rank == story_count else f"Tease {rank + 1}",
+            }
+        )
+    return {
+        "hour_theme": "Momentum across the hour",
+        "hour_narrative_brief": "Carry the listener from one NFL thread into the next.",
+        "segments": segments,
+    }
+
+
 def test_team_update_request_normalizes_team() -> None:
     request = TeamUpdateReportRequest(team="min")
 
@@ -391,6 +426,7 @@ def test_team_update_workflow_uses_agent_specific_model_overrides(tmp_path: Path
         openai_model_team_update_batch_agent="batch-model",
         openai_model_hourly_playlist_orchestrator_agent="playlist-model",
         openai_model_radio_script_writer_agent="script-model",
+        openai_model_hourly_narrative_planner_agent="narrative-planner-model",
         openai_model_hourly_script_batch_agent="script-batch-model",
     )
 
@@ -407,9 +443,11 @@ def test_team_update_workflow_uses_agent_specific_model_overrides(tmp_path: Path
     assert workflow.team_update_agent.model == "team-update-model"
     assert workflow.team_update_batch_agent.model == "batch-model"
     assert workflow.hourly_playlist_orchestrator_agent.model == "playlist-model"
+    assert workflow.hourly_narrative_planner_agent.model == "narrative-planner-model"
     assert workflow.radio_script_writer_agent.model == "script-model"
     assert workflow.hourly_script_batch_agent.model == "script-batch-model"
     assert workflow.script_generation_stacks["de-DE"].radio_script_writer_agent.model == "script-model"
+    assert workflow.script_generation_stacks["de-DE"].hourly_narrative_planner_agent.model == "narrative-planner-model"
     assert workflow.script_generation_stacks["de-DE"].hourly_script_batch_agent.model == "script-batch-model"
 
 
@@ -634,10 +672,12 @@ def test_team_update_workflow_builds_real_agent_instances(tmp_path: Path) -> Non
     assert workflow.team_update_agent.name == "Team Update Agent"
     assert workflow.team_update_tool.name == "build_team_update_package"
     assert workflow.team_update_batch_agent.name == "Team Update Batch Agent"
+    assert workflow.hourly_narrative_planner_agent.name == "Hourly Narrative Planner Agent"
     assert workflow.radio_script_writer_agent.name == "Radio Script Writer Agent"
     assert workflow.radio_story_script_tool.name == "build_radio_story_script"
     assert workflow.hourly_script_batch_agent.name == "Hourly Script Batch Agent"
     assert workflow.script_generation_stacks["de-DE"].radio_script_writer_agent.name == "Radio Script Writer Agent (de-DE)"
+    assert workflow.script_generation_stacks["de-DE"].hourly_narrative_planner_agent.name == "Hourly Narrative Planner Agent (de-DE)"
     assert workflow.script_generation_stacks["de-DE"].hourly_script_batch_agent.name == "Hourly Script Batch Agent (de-DE)"
 
 
@@ -827,6 +867,38 @@ def test_history_store_returns_latest_playlist_and_persists_story_scripts(tmp_pa
     assert scripts[0].language == "en-US"
 
 
+def test_history_store_persists_hourly_narrative_plans(tmp_path: Path) -> None:
+    store = TeamUpdateHistoryStore(tmp_path / "history.sqlite3")
+    generated_at = datetime.now(UTC)
+    playlist_id = store.save_hourly_playlist(
+        batch_run_id="batch-1",
+        generated_at=generated_at,
+        lookback_minutes=60,
+        playlist=HourlyPlaylist(selected_count=0, items=[]),
+    )
+
+    narrative_plan = HourlyNarrativePlan.model_validate(make_narrative_plan_output())
+    store.save_hourly_narrative_plan(
+        script_run_id="script-run-1",
+        playlist_id=playlist_id,
+        batch_run_id="batch-1",
+        language="en-US",
+        generated_at=generated_at,
+        narrative_plan=narrative_plan,
+    )
+
+    latest_plan = store.get_latest_hourly_narrative_plan(
+        playlist_id=playlist_id,
+        language="en-US",
+    )
+    plans = store.list_hourly_narrative_plans(playlist_id=playlist_id)
+
+    assert latest_plan is not None
+    assert latest_plan.script_run_id == "script-run-1"
+    assert latest_plan.playlist_id == playlist_id
+    assert plans[0].narrative_plan_json["hour_theme"] == "Momentum across the hour"
+
+
 def test_history_store_reads_legacy_story_scripts_as_en_us(tmp_path: Path) -> None:
     db_path = tmp_path / "history.sqlite3"
     with sqlite3.connect(db_path) as connection:
@@ -929,9 +1001,96 @@ def test_build_hourly_script_batch_input_includes_language_and_selected_personas
         ],
     )
 
-    assert '"language": "de-DE"' in payload
-    assert '"name": "Mika Brandt"' in payload
-    assert '"voice_name": "Charon"' in payload
+    assert '"language":"de-DE"' in payload
+    assert '"name":"Mika Brandt"' in payload
+    assert '"voice_name":"Charon"' in payload
+
+
+def test_apply_hourly_narrative_plan_enriches_selected_story_context() -> None:
+    selected_stories = [
+        RadioStoryScriptInput(
+            team="MIN",
+            playlist_rank=1,
+            headline="Headline 1",
+            framing="new",
+            continuity="new_story",
+            production_reason="Lead story.",
+            story_synopsis="Synopsis 1",
+            source_articles=[],
+        ),
+        RadioStoryScriptInput(
+            team="LAC",
+            playlist_rank=2,
+            headline="Headline 2",
+            framing="update",
+            continuity="follow_up_to_tracked_story",
+            production_reason="Second story.",
+            story_synopsis="Synopsis 2",
+            source_articles=[],
+        ),
+    ]
+
+    enriched = apply_hourly_narrative_plan(
+        selected_stories,
+        HourlyNarrativePlan.model_validate(make_narrative_plan_output(story_count=2)),
+    )
+
+    assert enriched[0].narrative_context.segment_role == "opener"
+    assert enriched[0].narrative_context.handoff_out == "Tee up rank 2"
+    assert enriched[1].narrative_context.previous_segment_headline == "Headline 1"
+    assert enriched[1].narrative_context.segment_role == "closer"
+    assert enriched[1].narrative_context.primary_angle == "Primary angle for rank 2"
+    assert enriched[1].narrative_context.callback_budget == "One brief callback sentence max."
+    assert enriched[1].narrative_context.facts_already_aired == ["Already aired fact for rank 2"]
+    assert enriched[1].narrative_context.fresh_material_to_emphasize == ["Fresh detail for rank 2"]
+    assert "Focus for rank 2" in enriched[1].story_synopsis
+
+
+def test_apply_hourly_narrative_plan_carries_whole_hour_freshness_context() -> None:
+    selected_stories = [
+        RadioStoryScriptInput(
+            team="MIN",
+            playlist_rank=1,
+            headline="Headline 1",
+            framing="new",
+            continuity="new_story",
+            production_reason="Lead story.",
+            story_synopsis="Synopsis 1",
+            source_articles=[],
+        ),
+        RadioStoryScriptInput(
+            team="BUF",
+            playlist_rank=2,
+            headline="Headline 2",
+            framing="new",
+            continuity="new_story",
+            production_reason="Middle story.",
+            story_synopsis="Synopsis 2",
+            source_articles=[],
+        ),
+        RadioStoryScriptInput(
+            team="LAC",
+            playlist_rank=3,
+            headline="Headline 3",
+            framing="update",
+            continuity="follow_up_to_tracked_story",
+            production_reason="Related later story.",
+            story_synopsis="Synopsis 3",
+            source_articles=[],
+        ),
+    ]
+
+    enriched = apply_hourly_narrative_plan(
+        selected_stories,
+        HourlyNarrativePlan.model_validate(make_narrative_plan_output(story_count=3)),
+    )
+
+    assert enriched[2].narrative_context.story_thread == "shared-event-thread"
+    assert enriched[2].narrative_context.already_aired_summary == (
+        "Listener already heard the core event before rank 3."
+    )
+    assert enriched[2].narrative_context.facts_already_aired == ["Already aired fact for rank 3"]
+    assert enriched[2].narrative_context.fresh_material_to_emphasize == ["Fresh detail for rank 3"]
 
 
 @pytest.mark.asyncio
@@ -1085,7 +1244,7 @@ async def test_team_update_workflow_marks_new_candidate_without_history(
     assert report.status == "report_ready"
     assert report.report is not None
     assert report.coverage.new_candidates == 1
-    assert '"framing": "new"' in captured_message
+    assert '"framing":"new"' in captured_message
 
 
 @pytest.mark.asyncio
@@ -1164,7 +1323,7 @@ async def test_team_update_workflow_marks_update_candidate_from_prior_group_hist
 
     assert report.status == "report_ready"
     assert report.coverage.update_candidates == 1
-    assert '"framing": "update"' in captured_message
+    assert '"framing":"update"' in captured_message
 
 
 @pytest.mark.asyncio
@@ -1203,7 +1362,7 @@ async def test_team_update_workflow_marks_update_candidate_from_prior_url_histor
     )
 
     async def fake_runner(agent, message, **_kwargs):
-        assert '"matched_by": "url"' in message
+        assert '"matched_by":"url"' in message
         return SimpleNamespace(
             final_output=TeamUpdatePackage(
                 total_duration_seconds=180,
@@ -1267,7 +1426,7 @@ async def test_team_update_workflow_marks_update_candidate_from_produced_history
     )
 
     async def fake_runner(agent, message, **_kwargs):
-        assert '"continuity": "follow_up_to_produced_story"' in message
+        assert '"continuity":"follow_up_to_produced_story"' in message
         return SimpleNamespace(
             final_output=TeamUpdatePackage(
                 total_duration_seconds=180,
@@ -1357,7 +1516,7 @@ async def test_team_update_end_to_end_persists_then_frames_followup_as_update(
     framings: list[str] = []
 
     async def fake_runner(agent, message, **_kwargs):
-        framing = "update" if '"framing": "update"' in message else "new"
+        framing = "update" if '"framing":"update"' in message else "new"
         framings.append(framing)
         return SimpleNamespace(
             final_output=TeamUpdatePackage(
@@ -1418,10 +1577,16 @@ async def test_team_update_batch_uses_single_top_level_runner_call(
         article_lookup_responses={story.url: make_article_lookup_response(url=story.url, group_id="group-1")},
         group_update_responses={"group-1": make_group_updates_response(group_id="group-1")},
     )
-    calls: list[tuple[str, str | None]] = []
+    calls: list[tuple[str, str | None, bool | None]] = []
 
     async def fake_runner(agent, message, *, run_config=None, **_kwargs):
-        calls.append((agent.name, getattr(run_config, "group_id", None)))
+        calls.append(
+            (
+                agent.name,
+                getattr(run_config, "group_id", None),
+                _kwargs.get("auto_previous_response_id"),
+            )
+        )
         if agent.name == "Team Update Batch Agent":
             assert "selected_teams" in message
             return SimpleNamespace(
@@ -1489,8 +1654,8 @@ async def test_team_update_batch_uses_single_top_level_runner_call(
     assert len(batch_response.reports) == 1
     assert batch_response.hourly_playlist.selected_count == 1
     assert calls == [
-        ("Team Update Batch Agent", "batch-run-1"),
-        ("Hourly Playlist Orchestrator Agent", "batch-run-1"),
+        ("Team Update Batch Agent", "batch-run-1", True),
+        ("Hourly Playlist Orchestrator Agent", "batch-run-1", True),
     ]
 
 
@@ -1551,8 +1716,8 @@ async def test_team_update_batch_persists_all_reports_and_marks_playlist_selecti
                 )
             )
 
-        assert '"team": "MIN"' in message
-        assert '"team": "ATL"' not in message
+        assert '"team":"MIN"' in message
+        assert '"team":"ATL"' not in message
         assert '"eligible_reports"' in message
         return SimpleNamespace(
             final_output=HourlyPlaylist(
@@ -1589,6 +1754,179 @@ async def test_team_update_batch_persists_all_reports_and_marks_playlist_selecti
     assert stored_by_team["MIN"].production_rank == 1
     assert stored_by_team["ATL"].production_status == "tracked_only"
     assert playlists[0].selected_count == 1
+
+
+@pytest.mark.asyncio
+async def test_team_update_batch_normalizes_agent_report_order_to_input_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    min_story = make_story(team_code="MIN")
+    atl_story = make_story(
+        story_id="story-2",
+        url="https://example.com/story-2",
+        title="Falcons update",
+        team_code="ATL",
+    )
+    workflow = build_workflow(
+        tmp_path,
+        stories=[min_story, atl_story],
+        article_lookup_responses={
+            min_story.url: make_article_lookup_response(url=min_story.url, group_id="group-1"),
+            atl_story.url: make_article_lookup_response(url=atl_story.url, group_id="group-2"),
+        },
+        group_update_responses={
+            "group-1": make_group_updates_response(group_id="group-1"),
+            "group-2": make_group_updates_response(group_id="group-2"),
+        },
+    )
+
+    async def fake_runner(agent, _message, **_kwargs):
+        if agent.name == "Team Update Batch Agent":
+            return SimpleNamespace(
+                final_output=TeamUpdateBatchAgentResult(
+                    reports=[
+                        TeamUpdateBatchAgentReport(
+                            team="ATL",
+                            lookback_minutes=60,
+                            status="report_ready",
+                            report=TeamUpdatePackage(
+                                total_duration_seconds=180,
+                                headline="ATL package",
+                                topics=[make_topic(headline="ATL topic")],
+                                source_articles=[
+                                    SourceArticleRef(
+                                        story_id=atl_story.id,
+                                        url=atl_story.url,
+                                        title=atl_story.title,
+                                        source_name=atl_story.source_name,
+                                    )
+                                ],
+                            ),
+                        ),
+                        TeamUpdateBatchAgentReport(
+                            team="MIN",
+                            lookback_minutes=60,
+                            status="report_ready",
+                            report=TeamUpdatePackage(
+                                total_duration_seconds=180,
+                                headline="MIN package",
+                                topics=[make_topic(headline="MIN topic")],
+                                source_articles=[
+                                    SourceArticleRef(
+                                        story_id=min_story.id,
+                                        url=min_story.url,
+                                        title=min_story.title,
+                                        source_name=min_story.source_name,
+                                    )
+                                ],
+                            ),
+                        ),
+                    ]
+                )
+            )
+
+        return SimpleNamespace(
+            final_output=HourlyPlaylist(
+                selected_count=2,
+                items=[
+                    HourlyPlaylistItem(
+                        rank=1,
+                        team="MIN",
+                        headline="MIN package",
+                        framing="new",
+                        continuity="new_story",
+                        production_reason="Open with Minnesota.",
+                        source_articles=[],
+                    ),
+                    HourlyPlaylistItem(
+                        rank=2,
+                        team="ATL",
+                        headline="ATL package",
+                        framing="new",
+                        continuity="new_story",
+                        production_reason="Keep Atlanta in the hour.",
+                        source_articles=[],
+                    ),
+                ],
+            )
+        )
+
+    monkeypatch.setattr("app.newsroom.workflow_team_update.Runner.run", fake_runner)
+
+    batch_response = await workflow.run_team_update_batch(
+        run_id="batch-run-1",
+        generated_at=datetime.now(UTC),
+        request=TeamUpdateBatchRequest(teams=["MIN", "ATL"], lookback_minutes=60),
+    )
+
+    assert [report.team for report in batch_response.reports] == ["MIN", "ATL"]
+
+
+@pytest.mark.asyncio
+async def test_team_update_batch_rejects_invalid_no_update_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    min_story = make_story(team_code="MIN")
+    workflow = build_workflow(
+        tmp_path,
+        stories=[min_story],
+        article_lookup_responses={
+            min_story.url: make_article_lookup_response(url=min_story.url, group_id="group-1"),
+        },
+        group_update_responses={
+            "group-1": make_group_updates_response(group_id="group-1"),
+        },
+    )
+
+    async def fake_runner(agent, _message, **_kwargs):
+        if agent.name == "Team Update Batch Agent":
+            return SimpleNamespace(
+                final_output=TeamUpdateBatchAgentResult(
+                    reports=[
+                        TeamUpdateBatchAgentReport(
+                            team="MIN",
+                            lookback_minutes=60,
+                            status="report_ready",
+                            report=TeamUpdatePackage(
+                                total_duration_seconds=180,
+                                headline="MIN package",
+                                topics=[make_topic(headline="MIN topic")],
+                                source_articles=[
+                                    SourceArticleRef(
+                                        story_id=min_story.id,
+                                        url=min_story.url,
+                                        title=min_story.title,
+                                        source_name=min_story.source_name,
+                                    )
+                                ],
+                            ),
+                        ),
+                        TeamUpdateBatchAgentReport(
+                            team="ATL",
+                            lookback_minutes=60,
+                            status="report_ready",
+                            report=TeamUpdatePackage(
+                                total_duration_seconds=180,
+                                headline="ATL package",
+                                topics=[make_topic(headline="ATL topic")],
+                                source_articles=[],
+                            ),
+                        ),
+                    ]
+                )
+            )
+        raise AssertionError("Hourly playlist should not run when batch validation fails.")
+
+    monkeypatch.setattr("app.newsroom.workflow_team_update.Runner.run", fake_runner)
+
+    with pytest.raises(ValueError, match="expected no_update"):
+        await workflow.run_team_update_batch(
+            run_id="batch-run-1",
+            generated_at=datetime.now(UTC),
+            request=TeamUpdateBatchRequest(teams=["MIN", "ATL"], lookback_minutes=60),
+        )
 
 
 @pytest.mark.asyncio
@@ -1672,12 +2010,19 @@ async def test_hourly_playlist_scripts_use_latest_saved_playlist_and_persist_scr
     )
 
     async def fake_runner(agent, message, **_kwargs):
+        if agent.name == "Hourly Narrative Planner Agent":
+            assert '"playlist_id":"' in message
+            assert "prior_narrative_plan" not in message
+            return SimpleNamespace(final_output=make_narrative_plan_output())
         assert agent.name == "Hourly Script Batch Agent"
-        assert '"playlist_id": "' in message
-        assert '"persona_roster": [' in message
-        assert '"voice_name": "Charon"' in message
-        assert '"continuity": "follow_up_to_produced_story"' in message
-        assert '"production_reason": "Strong lead for the hour."' in message
+        assert '"playlist_id":"' in message
+        assert '"persona_roster":[' in message
+        assert '"voice_name":"Charon"' in message
+        assert '"continuity":"follow_up_to_produced_story"' in message
+        assert '"production_reason":"Strong lead for the hour."' in message
+        assert '"hour_narrative_brief":"Carry the listener from one NFL thread into the next."' in message
+        assert '"primary_angle":"Primary angle for rank 1"' in message
+        assert '"fresh_material_to_emphasize":[' in message
         return SimpleNamespace(
             final_output={
                 "scripts": [
@@ -1699,6 +2044,7 @@ async def test_hourly_playlist_scripts_use_latest_saved_playlist_and_persist_scr
     )
 
     saved_scripts = workflow._history_store.list_story_scripts(script_run_id="script-run-1")
+    saved_narrative_plans = workflow._history_store.list_hourly_narrative_plans(script_run_id="script-run-1")
 
     assert response.playlist_id == playlist_id
     assert len(response.scripts) == 1
@@ -1710,6 +2056,7 @@ async def test_hourly_playlist_scripts_use_latest_saved_playlist_and_persist_scr
     assert saved_scripts[0].playlist_id == playlist_id
     assert saved_scripts[0].script_run_id == "script-run-1"
     assert saved_scripts[0].language == "en-US"
+    assert saved_narrative_plans[0].playlist_id == playlist_id
     assert tts_batch.create_calls[0]["items"][0]["id"] == "min-headline"
     assert tts_batch.create_calls[0]["items"][0]["voice_name"] == "Puck"
     assert tts_batch.create_calls[0]["items"][0]["script"]["body"] == "Body"
@@ -1819,9 +2166,13 @@ async def test_hourly_playlist_scripts_support_de_de_language(
     )
 
     async def fake_runner(agent, message, **_kwargs):
+        if agent.name == "Hourly Narrative Planner Agent (de-DE)":
+            assert '"language":"de-DE"' in message
+            return SimpleNamespace(final_output=make_narrative_plan_output())
         assert agent.name == "Hourly Script Batch Agent (de-DE)"
-        assert '"language": "de-DE"' in message
-        assert '"name": "Mika Brandt"' in message
+        assert '"language":"de-DE"' in message
+        assert '"name":"Mika Brandt"' in message
+        assert '"primary_angle":"Primary angle for rank 1"' in message
         return SimpleNamespace(
             final_output={
                 "scripts": [
@@ -1924,6 +2275,8 @@ async def test_hourly_playlist_scripts_skip_tts_when_disabled(
     )
 
     async def fake_runner(_agent, _message, **_kwargs):
+        if _agent.name == "Hourly Narrative Planner Agent":
+            return SimpleNamespace(final_output=make_narrative_plan_output())
         return SimpleNamespace(final_output={"scripts": [make_radio_story_script().model_dump(mode="json")]})
 
     monkeypatch.setattr("app.newsroom.workflow_team_update.Runner.run", fake_runner)
@@ -2011,6 +2364,8 @@ async def test_hourly_playlist_scripts_raise_on_terminal_tts_failure(
     )
 
     async def fake_runner(_agent, _message, **_kwargs):
+        if _agent.name == "Hourly Narrative Planner Agent":
+            return SimpleNamespace(final_output=make_narrative_plan_output())
         return SimpleNamespace(final_output={"scripts": [make_radio_story_script().model_dump(mode="json")]})
 
     monkeypatch.setattr("app.newsroom.workflow_team_update.Runner.run", fake_runner)
@@ -2317,3 +2672,41 @@ def test_write_scripts_cli_command_accepts_no_tts(
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["tts_batch"] is None
+
+
+def test_process_tts_cli_uses_configured_batch_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = build_settings(tmp_path)
+    settings.gemini_tts_batch_timeout_seconds = 777.0
+    captured: dict[str, object] = {}
+
+    class FakeGeminiTTSBatchAdapter:
+        def __init__(self, endpoint_url: str, process_timeout_seconds: float = 300.0) -> None:
+            captured["endpoint_url"] = endpoint_url
+            captured["process_timeout_seconds"] = process_timeout_seconds
+
+        async def process_batch(self, request):
+            captured["request"] = request.model_dump(mode="json")
+            return TTSBatchResult.model_validate(
+                {
+                    "batch_id": "batches/abc123",
+                    "status": "JOB_STATE_SUCCEEDED",
+                    "processed_count": 1,
+                    "failed_count": 0,
+                    "token_usage": {},
+                    "items": [],
+                    "failures": [],
+                }
+            )
+
+    monkeypatch.setattr("app.cli.get_settings", lambda: settings)
+    monkeypatch.setattr("app.cli.GeminiTTSBatchAdapter", FakeGeminiTTSBatchAdapter)
+
+    result = CliRunner().invoke(cli_app, ["process-tts", "--batch-id", "batches/abc123"])
+
+    assert result.exit_code == 0
+    assert captured["endpoint_url"] == str(settings.gemini_tts_batch_url)
+    assert captured["process_timeout_seconds"] == 777.0
+    assert captured["request"]["batch_id"] == "batches/abc123"

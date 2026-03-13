@@ -8,13 +8,17 @@ from app.logging_config import configure_logging
 configure_logging()
 
 from fastapi import FastAPI
+from fastapi import Query
+from fastapi.responses import HTMLResponse
 
 from app.config import Settings, get_settings
 from app.orchestration import NewsroomOrchestrator, build_default_orchestrator
+from app.qa_player import build_qa_player_feed, load_qa_player_html
 from app.schemas import (
     HealthStatus,
     HourlyPlaylistScriptsRequest,
     HourlyPlaylistScriptsResponse,
+    QAPlayerFeed,
     RadioRundown,
     RadioRundownRequest,
     TeamUpdateBatchRequest,
@@ -89,6 +93,15 @@ def create_app(
     ) -> HourlyPlaylistScriptsResponse:
         logger.info("Received hourly playlist scripts request")
         return await _get_orchestrator().run_hourly_playlist_scripts(request)
+
+    @app.get("/qa/player", response_class=HTMLResponse)
+    async def qa_player() -> HTMLResponse:
+        return HTMLResponse(load_qa_player_html())
+
+    @app.get("/qa/player-feed", response_model=QAPlayerFeed)
+    async def qa_player_feed(batch: str | None = Query(default=None)) -> QAPlayerFeed:
+        resolved_settings = app.state.settings or get_settings()
+        return build_qa_player_feed(resolved_settings, batch=batch)
 
     return app
 

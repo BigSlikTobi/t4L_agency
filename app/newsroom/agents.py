@@ -10,6 +10,7 @@ from app.newsroom.model import build_model_settings
 from app.newsroom.prompts import get_prompt
 from app.schemas import (
     ArticleDigestAgentResult,
+    HourlyNarrativePlan,
     HourlyPlaylist,
     HourlyPlaylistSelection,
     HourlyPlaylistScriptsBatchAgentResult,
@@ -34,6 +35,7 @@ def build_article_data_agent(
             settings,
             tool_choice="required",
             parallel_tool_calls=False,
+            max_tokens=800,
         ),
         tools=[article_lookup_tool],
         output_type=ArticleDigestAgentResult,
@@ -110,6 +112,22 @@ def build_hourly_playlist_orchestrator_agent(
         model_settings=build_model_settings(settings, parallel_tool_calls=False),
         tools=[],
         output_type=HourlyPlaylistSelection,
+    )
+
+
+def build_hourly_narrative_planner_agent(
+    settings: Settings,
+    *,
+    prompt_name: str = "hourly_narrative_planner_agent",
+    agent_name: str = "Hourly Narrative Planner Agent",
+) -> Agent:
+    return Agent(
+        name=agent_name,
+        instructions=get_prompt(prompt_name),
+        model=settings.agent_model("hourly_narrative_planner_agent"),
+        model_settings=build_model_settings(settings, parallel_tool_calls=False),
+        tools=[],
+        output_type=HourlyNarrativePlan,
     )
 
 

@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 from agents import Agent
 from agents import Runner as SDKRunner
+from agents.tool_context import ToolContext
 
 from app.adapters import NewsFeedAdapter, SupabaseArticleLookupAdapter
 from app.config import Settings
 from app.constants import NFL_TEAMS
 from app.newsroom.context import NewsroomRunContext
 from app.newsroom.prompts import load_prompts
+from app.newsroom.tools import build_article_data_tool
 from app.newsroom.helpers import (
     build_selected_team_payloads,
     capture_selected_story_coverage,
@@ -22,6 +25,7 @@ from app.newsroom.helpers import (
 )
 from app.newsroom.workflow import AgentsWorkflow
 from app.schemas import (
+    ArticleDigestAgentResult,
     FeedStory,
     RadioRundown,
     RadioRundownRequest,
@@ -115,6 +119,60 @@ def test_article_data_agent_uses_supabase_prompt() -> None:
     assert "stored article data from Supabase" in workflow.article_data_agent.instructions
 
 
+@pytest.mark.asyncio
+async def test_article_data_tool_uses_auto_previous_response_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    workflow = build_workflow()
+    tool = build_article_data_tool(workflow.article_data_agent)
+    context = ToolContext(
+        context=build_context(),
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments="{}",
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_runner(agent, message, **kwargs):
+        captured["agent_name"] = agent.name
+        captured["message"] = message
+        captured["auto_previous_response_id"] = kwargs.get("auto_previous_response_id")
+        captured["context"] = kwargs.get("context")
+        return SimpleNamespace(
+            final_output=ArticleDigestAgentResult(
+                summary="Stored summary",
+                key_facts=["Fact 1"],
+                confidence=0.9,
+                content_status="full",
+            )
+        )
+
+    monkeypatch.setattr("app.newsroom.tools.Runner.run", fake_runner)
+
+    result = await tool.on_invoke_tool(
+        context,
+        json.dumps(
+            {
+                "story_id": "story-1",
+                "url": "https://example.com/story-1",
+                "title": "Story 1",
+                "source_name": "ESPN",
+                "category": "Breaking News",
+                "team_mentions": ["ARI"],
+            }
+        ),
+    )
+
+    assert result["summary"] == "Stored summary"
+    assert captured == {
+        "agent_name": "Article Data Agent",
+        "message": (
+            '{"story_id":"story-1","url":"https://example.com/story-1","title":"Story 1",'
+            '"source_name":"ESPN","category":"Breaking News","team_mentions":["ARI"]}'
+        ),
+        "auto_previous_response_id": True,
+        "context": context.context,
+    }
+
+
 def test_closed_world_rules_are_present_in_narrative_prompts() -> None:
     prompts = load_prompts()
 
@@ -123,6 +181,7 @@ def test_closed_world_rules_are_present_in_narrative_prompts() -> None:
         "team_news_agent",
         "team_update_agent",
         "hourly_playlist_orchestrator_agent",
+        "hourly_narrative_planner_agent",
         "radio_script_writer_agent",
         "radio_script_writer_agent_de_de",
         "rundown_orchestrator_agent",
@@ -144,6 +203,7 @@ def test_concept_explainer_rule_is_present_in_narrative_prompts() -> None:
         "team_news_agent",
         "team_update_agent",
         "hourly_playlist_orchestrator_agent",
+        "hourly_narrative_planner_agent",
         "radio_script_writer_agent",
         "radio_script_writer_agent_de_de",
         "rundown_orchestrator_agent",
@@ -159,9 +219,22 @@ def test_writer_prompt_requires_traceable_facts_and_explicit_names() -> None:
     assert "every factual statement in the intro, body, and outro must be traceable" in prompt
     assert "use that explicit name instead of vague phrasing" in prompt
     assert 'You may add "what this means" lines only as timeless concept explanations' in prompt
+    assert "Treat the narrative_context fields as hard direction" in prompt
+    assert "use only a brief callback and then pivot quickly into the fresh angle" in prompt
+    assert "Do not replay the prior segment's lead sentence pattern" in prompt
+    assert "Use primary_angle and fresh_material_to_emphasize as the center of gravity" in prompt
     assert "director_notes should be a compact high-level performance note" in prompt
     assert "pace should contain only the pacing guidance" in prompt
     assert "must_hit should list the exact names, phrases, or facts" in prompt
+
+
+def test_narrative_planner_prompt_requires_distinct_angles_for_related_stories() -> None:
+    prompt = load_prompts()["hourly_narrative_planner_agent"]
+
+    assert "same underlying event or storyline" in prompt
+    assert "meaningfully different primary_angle" in prompt
+    assert "facts_already_aired" in prompt
+    assert "fresh_material_to_emphasize" in prompt
 
 
 def test_german_script_prompts_are_present_and_localized() -> None:
@@ -171,6 +244,8 @@ def test_german_script_prompts_are_present_and_localized() -> None:
 
     assert "Write the following fields in natural German for a German radio audience" in writer_prompt
     assert "Keep proper names, team names, explicit quotes, and source-grounded NFL terminology accurate" in writer_prompt
+    assert "use only a brief callback and then pivot quickly into the fresh angle" in writer_prompt
+    assert "Preserve the supplied anti-repetition direction" in batch_prompt
     assert "All returned direction fields and script copy must be in natural German" in batch_prompt
 
 
@@ -178,7 +253,7 @@ def test_model_settings_omit_temperature_and_max_tokens_by_default() -> None:
     workflow = build_workflow()
 
     assert workflow.article_data_agent.model_settings.temperature is None
-    assert workflow.article_data_agent.model_settings.max_tokens is None
+    assert workflow.article_data_agent.model_settings.max_tokens == 800
     assert workflow.team_agent.model_settings.temperature is None
     assert workflow.team_agent.model_settings.max_tokens is None
     assert workflow.orchestrator_agent.model_settings.temperature is None
@@ -327,10 +402,17 @@ def test_selected_team_payloads_include_only_exact_team_matches() -> None:
 async def test_run_newsroom_uses_single_top_level_runner_call(monkeypatch) -> None:
     workflow = build_workflow()
     context = build_context()
-    calls: list[tuple[str, str | None, int | None]] = []
+    calls: list[tuple[str, str | None, int | None, bool | None]] = []
 
     async def fake_runner(agent, message, *, context=None, run_config=None, max_turns=None, **_kwargs):
-        calls.append((agent.name, getattr(run_config, "group_id", None), max_turns))
+        calls.append(
+            (
+                agent.name,
+                getattr(run_config, "group_id", None),
+                max_turns,
+                _kwargs.get("auto_previous_response_id"),
+            )
+        )
         assert "selected_teams" in message
         return SimpleNamespace(
             final_output=RadioRundown(
@@ -350,7 +432,7 @@ async def test_run_newsroom_uses_single_top_level_runner_call(monkeypatch) -> No
 
     assert result.target_duration_minutes == 60
     assert len(context.feed_stories) == 1
-    assert calls == [("Rundown Orchestrator Agent", "run-1", 36)]
+    assert calls == [("Rundown Orchestrator Agent", "run-1", 36, True)]
 
 
 @pytest.mark.asyncio
@@ -382,9 +464,9 @@ async def test_run_newsroom_limits_selected_team_payloads(monkeypatch) -> None:
 
     await workflow.run_newsroom(context)
 
-    assert "\"team_code\": \"ARI\"" in captured_message
-    assert "\"team_code\": \"MIN\"" in captured_message
-    assert "\"team_code\": \"ATL\"" not in captured_message
+    assert '"team_code":"ARI"' in captured_message
+    assert '"team_code":"MIN"' in captured_message
+    assert '"team_code":"ATL"' not in captured_message
 
 
 def test_capture_source_usage_builds_digest_placeholders_from_feed_refs() -> None:

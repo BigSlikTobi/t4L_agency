@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
 from app.config import Settings
+from app.history import TeamUpdateHistoryStore
 from app.main import create_app
 from app.schemas import (
     HourlyPlaylist,
     HourlyPlaylistItem,
     HourlyPlaylistScriptsResponse,
     RadioRundown,
+    RadioStoryScript,
     SegmentCandidate,
     SourceArticleRef,
     SourceCoverage,
@@ -222,13 +226,48 @@ class FakeOrchestrator:
         )
 
 
-def build_settings() -> Settings:
+def build_settings(*, team_update_history_sqlite_path: Path | None = None) -> Settings:
     return Settings(
         openai_api_key="sk-test",
         supabase_news_feed_url="https://example.com/feed",
         supabase_article_lookup_url="https://example.com/article-lookup",
         supabase_function_auth_token="supabase-token",
         supabase_storage_key="storage-key",
+        team_update_history_sqlite_path=team_update_history_sqlite_path or Path("./var/team_update_history.sqlite3"),
+    )
+
+
+def make_radio_story_script(
+    *,
+    team: str = "MIN",
+    playlist_rank: int = 1,
+    language: str = "en-US",
+) -> RadioStoryScript:
+    return RadioStoryScript(
+        team=team,
+        playlist_rank=playlist_rank,
+        language=language,
+        headline=f"{team} headline",
+        continuity="new_story",
+        persona_name="Lena Torres",
+        persona_backstory="Phoenix night host turned NFL connector.",
+        persona_specialty="fan emotion and momentum swings",
+        voice_name="Puck",
+        dialect="a slight Arizona-Southwest lilt",
+        duration_seconds=180,
+        slug=f"{team.lower()}-headline",
+        audio_profile="Warm FM host with bright energy and close-mic intimacy.",
+        scene="Late-hour NFL update hitting a listener on the drive home.",
+        director_notes="Stay warm, direct, and vivid. Build quick connection.",
+        pace="Urgent but controlled.",
+        warmth="Engaged and direct.",
+        must_hit=["Headline", "Key fact"],
+        pronunciations=[],
+        tts_prompt="Audio Profile: Warm FM host.\nScene: Drive-home NFL update.\nDirector's Notes: Warm and direct.\nScript: Intro Body Outro",
+        intro="Intro",
+        body="Body",
+        outro="Outro",
+        source_articles=[],
     )
 
 
@@ -320,3 +359,224 @@ def test_create_hourly_playlist_scripts_accepts_enable_tts_override() -> None:
 
     assert response.status_code == 200
     assert orchestrator.last_hourly_playlist_scripts_request.enable_tts is False
+
+
+def test_qa_player_page_loads() -> None:
+    app = create_app(settings=build_settings(), orchestrator=FakeOrchestrator())
+    client = TestClient(app)
+
+    response = client.get("/qa/player")
+
+    assert response.status_code == 200
+    assert "QA Radio Player" in response.text
+    assert "/qa/player-feed" in response.text
+
+
+def test_qa_player_feed_prefers_latest_scripts_artifact(tmp_path: Path) -> None:
+    settings = build_settings(team_update_history_sqlite_path=tmp_path / "team_update_history.sqlite3")
+    scripts_path = settings.team_update_history_sqlite_path.parent / "scripts.json"
+    scripts_path.parent.mkdir(parents=True, exist_ok=True)
+    scripts_path.write_text(
+        HourlyPlaylistScriptsResponse(
+            language="en-US",
+            voice_name="Puck",
+            items=[
+                {
+                    "id": "vikings-update",
+                    "title": "Minnesota Vikings update",
+                    "direction": {
+                        "audio_profile": "Warm FM host with bright energy.",
+                        "scene": "Drive-home NFL update.",
+                        "director_notes": "Stay warm and direct.",
+                    },
+                    "script": {
+                        "intro": "Intro",
+                        "body": "Body",
+                        "outro": "Outro",
+                    },
+                }
+            ],
+            tts_batch={
+                "batch_id": "batches/abc123",
+                "status": "JOB_STATE_SUCCEEDED",
+                "processed_count": 1,
+                "failed_count": 0,
+                "token_usage": {},
+                "items": [
+                    {
+                        "id": "vikings-update",
+                        "storage_path": "gemini-tts-batch/batches/abc123/vikings-update.mp3",
+                        "mime_type": "audio/mpeg",
+                        "source_mime_type": "audio/wav",
+                        "public_url": "https://example.com/vikings-update.mp3",
+                        "token_usage": {},
+                    }
+                ],
+                "failures": [],
+            },
+        ).model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    app = create_app(settings=settings, orchestrator=FakeOrchestrator())
+    client = TestClient(app)
+
+    response = client.get("/qa/player-feed")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source"] == "artifact"
+    assert payload["has_audio"] is True
+    assert payload["items"][0]["audio_url"] == "https://example.com/vikings-update.mp3"
+    assert payload["items"][0]["script_text"] == "Intro Body Outro"
+
+
+def test_qa_player_feed_supports_explicit_batch_override(tmp_path: Path) -> None:
+    settings = build_settings(team_update_history_sqlite_path=tmp_path / "team_update_history.sqlite3")
+    scripts_path = settings.team_update_history_sqlite_path.parent / "scripts.json"
+    scripts_path.parent.mkdir(parents=True, exist_ok=True)
+    scripts_path.write_text(
+        HourlyPlaylistScriptsResponse(
+            language="en-US",
+            voice_name="Puck",
+            items=[
+                {
+                    "id": "vikings-update",
+                    "title": "Minnesota Vikings update",
+                    "direction": {
+                        "audio_profile": "Warm FM host with bright energy.",
+                        "scene": "Drive-home NFL update.",
+                        "director_notes": "Stay warm and direct.",
+                    },
+                    "script": {
+                        "intro": "Intro",
+                        "body": "Body",
+                        "outro": "Outro",
+                    },
+                }
+            ],
+            tts_batch={
+                "batch_id": "batches/abc123",
+                "status": "JOB_STATE_SUCCEEDED",
+                "processed_count": 1,
+                "failed_count": 0,
+                "token_usage": {},
+                "items": [
+                    {
+                        "id": "vikings-update",
+                        "storage_path": "gemini-tts-batch/batches/abc123/vikings-update.mp3",
+                        "mime_type": "audio/mpeg",
+                        "source_mime_type": "audio/wav",
+                        "public_url": "https://example.com/vikings-update.mp3",
+                        "token_usage": {},
+                    }
+                ],
+                "failures": [],
+            },
+        ).model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    app = create_app(settings=settings, orchestrator=FakeOrchestrator())
+    client = TestClient(app)
+
+    response = client.get("/qa/player-feed", params={"batch": "gemini-tts-batch/batches/override-id"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["has_audio"] is True
+    assert (
+        payload["items"][0]["audio_url"]
+        == "https://example.com/storage/v1/object/public/audio/gemini-tts-batch/batches/override-id/vikings-update.mp3"
+    )
+
+
+def test_qa_player_feed_uses_requested_batch_manifest_items(tmp_path: Path) -> None:
+    settings = build_settings(team_update_history_sqlite_path=tmp_path / "team_update_history.sqlite3")
+    scripts_path = settings.team_update_history_sqlite_path.parent / "scripts.json"
+    scripts_path.parent.mkdir(parents=True, exist_ok=True)
+    scripts_path.write_text(
+        HourlyPlaylistScriptsResponse(
+            language="en-US",
+            voice_name="Puck",
+            items=[
+                {
+                    "id": "vikings-update",
+                    "title": "Minnesota Vikings update",
+                    "direction": {"audio_profile": "a", "scene": "b", "director_notes": "c"},
+                    "script": {"intro": "Intro", "body": "Body", "outro": "Outro"},
+                }
+            ],
+            tts_batch=None,
+        ).model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    app = create_app(settings=settings, orchestrator=FakeOrchestrator())
+    client = TestClient(app)
+
+    fake_manifest = {
+        "batch_id": "batches/override-id",
+        "status": "JOB_STATE_SUCCEEDED",
+        "output_file_id": "files/batch-override-id",
+        "processed_count": 2,
+        "failed_count": 0,
+        "token_usage": {},
+        "items": [
+            {
+                "id": "dj-moore-to-bills-why-it-ended-in-chicago",
+                "storage_path": "gemini-tts-batch/batches/override-id/dj-moore-to-bills-why-it-ended-in-chicago.mp3",
+                "mime_type": "audio/mpeg",
+                "source_mime_type": "audio/wav",
+                "public_url": "https://example.com/storage/v1/object/public/audio/gemini-tts-batch/batches/override-id/dj-moore-to-bills-why-it-ended-in-chicago.mp3",
+                "token_usage": {},
+            },
+            {
+                "id": "cowboys-crosby-door-open",
+                "storage_path": "gemini-tts-batch/batches/override-id/cowboys-crosby-door-open.mp3",
+                "mime_type": "audio/mpeg",
+                "source_mime_type": "audio/wav",
+                "public_url": "https://example.com/storage/v1/object/public/audio/gemini-tts-batch/batches/override-id/cowboys-crosby-door-open.mp3",
+                "token_usage": {},
+            },
+        ],
+        "failures": [],
+        "processed_at": "2026-03-13T16:21:53.441695+00:00",
+    }
+
+    with patch("app.qa_player.httpx.get", return_value=Mock(status_code=200, text="", raise_for_status=Mock())) as mocked_get:
+        mocked_get.return_value.text = __import__("json").dumps(fake_manifest)
+        response = client.get("/qa/player-feed", params={"batch": "gemini-tts-batch/batches/override-id"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["id"] for item in payload["items"]] == [
+        "dj-moore-to-bills-why-it-ended-in-chicago",
+        "cowboys-crosby-door-open",
+    ]
+    assert payload["items"][0]["audio_url"].endswith("dj-moore-to-bills-why-it-ended-in-chicago.mp3")
+
+
+def test_qa_player_feed_falls_back_to_latest_history_scripts(tmp_path: Path) -> None:
+    settings = build_settings(team_update_history_sqlite_path=tmp_path / "team_update_history.sqlite3")
+    store = TeamUpdateHistoryStore(settings.team_update_history_sqlite_path)
+    store.save_story_scripts(
+        script_run_id="script-run-1",
+        playlist_id="playlist-1",
+        batch_run_id="batch-1",
+        generated_at=datetime.now(UTC),
+        scripts=[
+            make_radio_story_script(team="MIN", playlist_rank=1),
+            make_radio_story_script(team="DET", playlist_rank=2),
+        ],
+    )
+    app = create_app(settings=settings, orchestrator=FakeOrchestrator())
+    client = TestClient(app)
+
+    response = client.get("/qa/player-feed")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source"] == "history"
+    assert payload["script_run_id"] == "script-run-1"
+    assert payload["playlist_id"] == "playlist-1"
+    assert payload["has_audio"] is False
+    assert [item["team"] for item in payload["items"]] == ["MIN", "DET"]
+    assert payload["items"][0]["script_text"] == "Intro Body Outro"
