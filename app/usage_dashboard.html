@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>T4L Usage Dashboard</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0d1117;
+        --panel: #161b22;
+        --panel-alt: #1f2630;
+        --text: #f3f5f7;
+        --muted: #99a2ad;
+        --accent: #69db7c;
+        --accent-soft: rgba(105, 219, 124, 0.16);
+        --border: rgba(255, 255, 255, 0.08);
+        --danger: #ff8787;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: radial-gradient(circle at top right, #1f2a38 0%, var(--bg) 45%);
+        color: var(--text);
+      }
+
+      .page {
+        max-width: 1440px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+
+      .header {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 24px;
+      }
+
+      .title {
+        margin: 0;
+        font-size: 32px;
+        line-height: 1.1;
+      }
+
+      .subtle {
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px;
+        border-radius: 999px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+      }
+
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: var(--accent);
+        box-shadow: 0 0 0 6px var(--accent-soft);
+      }
+
+      .grid {
+        display: grid;
+        gap: 16px;
+      }
+
+      .filters {
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        margin-bottom: 16px;
+      }
+
+      .cards {
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        margin-bottom: 16px;
+      }
+
+      .two-up {
+        grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+        margin-bottom: 16px;
+      }
+
+      .panel {
+        background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent), var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 18px;
+        min-height: 120px;
+      }
+
+      .filter-panel {
+        min-height: 0;
+      }
+
+      .filter-row {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+        align-items: end;
+      }
+
+      .field label {
+        display: block;
+        margin-bottom: 6px;
+        color: var(--muted);
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .field input {
+        width: 100%;
+        padding: 12px 14px;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: var(--panel-alt);
+        color: var(--text);
+      }
+
+      .actions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .actions button {
+        padding: 12px 16px;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: var(--panel-alt);
+        color: var(--text);
+        cursor: pointer;
+      }
+
+      .actions button.primary {
+        background: var(--accent);
+        color: #08120a;
+        border-color: transparent;
+        font-weight: 700;
+      }
+
+      .filter-summary {
+        margin-top: 12px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .metric-label {
+        color: var(--muted);
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .metric-value {
+        margin-top: 10px;
+        font-size: 34px;
+        font-weight: 700;
+      }
+
+      h2 {
+        margin: 0 0 14px;
+        font-size: 18px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 10px 0;
+        border-bottom: 1px solid var(--border);
+        vertical-align: top;
+      }
+
+      th {
+        color: var(--muted);
+        font-weight: 600;
+      }
+
+      .pill {
+        display: inline-block;
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: var(--panel-alt);
+        border: 1px solid var(--border);
+        font-size: 12px;
+      }
+
+      .empty {
+        color: var(--muted);
+      }
+
+      .warning {
+        color: var(--danger);
+      }
+
+      @media (max-width: 720px) {
+        .page {
+          padding: 16px;
+        }
+
+        .header {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+
+        .metric-value {
+          font-size: 28px;
+        }
+
+        table {
+          font-size: 13px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <div class="header">
+        <div>
+          <h1 class="title">T4L Local Usage Dashboard</h1>
+          <div class="subtle">Auto-refreshes every 3 seconds. No Grafana required.</div>
+        </div>
+        <div class="status">
+          <span class="dot"></span>
+          <span id="status-text">Loading...</span>
+        </div>
+      </div>
+
+      <section class="grid filters">
+        <div class="panel filter-panel">
+          <h2>History Search</h2>
+          <form id="filter-form">
+            <div class="filter-row">
+              <div class="field">
+                <label for="from-input">From</label>
+                <input id="from-input" name="from" type="datetime-local" />
+              </div>
+              <div class="field">
+                <label for="to-input">To</label>
+                <input id="to-input" name="to" type="datetime-local" />
+              </div>
+              <div class="field">
+                <label for="run-id-input">Run ID</label>
+                <input id="run-id-input" name="run_id" type="text" placeholder="run-123..." />
+              </div>
+              <div class="actions">
+                <button class="primary" type="submit">Apply</button>
+                <button id="clear-filters" type="button">Clear</button>
+              </div>
+            </div>
+          </form>
+          <div class="filter-summary" id="filter-summary">Showing all saved usage.</div>
+        </div>
+      </section>
+
+      <section class="grid cards">
+        <div class="panel">
+          <div class="metric-label">Total Tokens</div>
+          <div class="metric-value" id="total-tokens">0</div>
+        </div>
+        <div class="panel">
+          <div class="metric-label">Input Tokens</div>
+          <div class="metric-value" id="input-tokens">0</div>
+        </div>
+        <div class="panel">
+          <div class="metric-label">Output Tokens</div>
+          <div class="metric-value" id="output-tokens">0</div>
+        </div>
+        <div class="panel">
+          <div class="metric-label">Estimated Cost</div>
+          <div class="metric-value" id="cost-usd">$0.00</div>
+        </div>
+      </section>
+
+      <section class="grid cards">
+        <div class="panel">
+          <div class="metric-label">Requests</div>
+          <div class="metric-value" id="requests">0</div>
+        </div>
+        <div class="panel">
+          <div class="metric-label">Active Runs</div>
+          <div class="metric-value" id="active-runs">0</div>
+        </div>
+        <div class="panel">
+          <div class="metric-label">Cached Input</div>
+          <div class="metric-value" id="cached-input-tokens">0</div>
+        </div>
+        <div class="panel">
+          <div class="metric-label">Reasoning Tokens</div>
+          <div class="metric-value" id="reasoning-tokens">0</div>
+        </div>
+      </section>
+
+      <section class="grid two-up">
+        <div class="panel">
+          <h2>Usage By Agent</h2>
+          <div id="usage-by-agent"></div>
+        </div>
+        <div class="panel">
+          <h2>Usage By Model</h2>
+          <div id="usage-by-model"></div>
+        </div>
+      </section>
+
+      <section class="grid two-up">
+        <div class="panel">
+          <h2>Active Runs</h2>
+          <div id="active-runs-table"></div>
+        </div>
+        <div class="panel">
+          <h2>History</h2>
+          <div id="recent-events"></div>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const number = new Intl.NumberFormat("en-US");
+      const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+      const timestamp = new Intl.DateTimeFormat("en-US", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
+      const queryState = {
+        from: "",
+        to: "",
+        run_id: "",
+      };
+
+      function setText(id, value) {
+        document.getElementById(id).textContent = value;
+      }
+
+      function renderTable(targetId, columns, rows) {
+        const target = document.getElementById(targetId);
+        if (!rows.length) {
+          target.innerHTML = '<div class="empty">No data yet.</div>';
+          return;
+        }
+
+        const header = columns.map((column) => `<th>${column.label}</th>`).join("");
+        const body = rows
+          .map((row) => {
+            const cells = columns.map((column) => `<td>${column.render(row)}</td>`).join("");
+            return `<tr>${cells}</tr>`;
+          })
+          .join("");
+
+        target.innerHTML = `<table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>`;
+      }
+
+      function renderSnapshot(snapshot) {
+        const totals = snapshot.totals || {};
+        setText("total-tokens", number.format(totals.total_tokens || 0));
+        setText("input-tokens", number.format(totals.input_tokens || 0));
+        setText("output-tokens", number.format(totals.output_tokens || 0));
+        setText("cached-input-tokens", number.format(totals.cached_input_tokens || 0));
+        setText("reasoning-tokens", number.format(totals.reasoning_tokens || 0));
+        setText("requests", number.format(totals.requests || 0));
+        setText("active-runs", number.format((snapshot.active_runs || []).length));
+        setText("cost-usd", money.format(totals.estimated_cost_usd || 0));
+
+        let status = snapshot.telemetry_enabled ? "Telemetry is running locally" : "Telemetry is disabled";
+        if (snapshot.telemetry_enabled && !snapshot.export_configured) {
+          status += " · export is off";
+        }
+        document.getElementById("status-text").textContent = status;
+        renderFilterSummary(snapshot.applied_filters || {});
+
+        renderTable(
+          "usage-by-agent",
+          [
+            { label: "Agent", render: (row) => `<span class="pill">${row.key}</span>` },
+            { label: "Total Tokens", render: (row) => number.format(row.total_tokens || 0) },
+            { label: "Cost", render: (row) => money.format(row.estimated_cost_usd || 0) },
+          ],
+          snapshot.usage_by_agent || []
+        );
+
+        renderTable(
+          "usage-by-model",
+          [
+            { label: "Model", render: (row) => `<span class="pill">${row.key}</span>` },
+            { label: "Total Tokens", render: (row) => number.format(row.total_tokens || 0) },
+            { label: "Cost", render: (row) => money.format(row.estimated_cost_usd || 0) },
+          ],
+          snapshot.usage_by_model || []
+        );
+
+        renderTable(
+          "active-runs-table",
+          [
+            { label: "Run", render: (row) => `<code>${row.run_id}</code>` },
+            { label: "Stage", render: (row) => row.stage },
+            { label: "Started", render: (row) => timestamp.format(new Date(row.started_at)) },
+          ],
+          snapshot.active_runs || []
+        );
+
+        renderTable(
+          "recent-events",
+          [
+            { label: "Time", render: (row) => timestamp.format(new Date(row.occurred_at)) },
+            { label: "Run", render: (row) => `<code>${row.run_id}</code>` },
+            { label: "Agent", render: (row) => row.agent_name },
+            { label: "Model", render: (row) => row.model },
+            { label: "Tokens", render: (row) => number.format(row.total_tokens || 0) },
+          ],
+          snapshot.recent_events || []
+        );
+      }
+
+      function renderFilterSummary(filters) {
+        const parts = [];
+        if (filters.from) {
+          parts.push(`from ${timestamp.format(new Date(filters.from))}`);
+        }
+        if (filters.to) {
+          parts.push(`to ${timestamp.format(new Date(filters.to))}`);
+        }
+        if (filters.run_id) {
+          parts.push(`run ${filters.run_id}`);
+        }
+        document.getElementById("filter-summary").textContent = parts.length
+          ? `Filtered by ${parts.join(" · ")}`
+          : "Showing all saved usage.";
+      }
+
+      function formatForInput(value) {
+        if (!value) {
+          return "";
+        }
+        const date = new Date(value);
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, "0");
+        const day = String(date.getDate()).padStart(2, "0");
+        const hours = String(date.getHours()).padStart(2, "0");
+        const minutes = String(date.getMinutes()).padStart(2, "0");
+        return `${year}-${month}-${day}T${hours}:${minutes}`;
+      }
+
+      function syncFormFromQuery() {
+        const params = new URLSearchParams(window.location.search);
+        queryState.from = params.get("from") || "";
+        queryState.to = params.get("to") || "";
+        queryState.run_id = params.get("run_id") || "";
+        document.getElementById("from-input").value = formatForInput(queryState.from);
+        document.getElementById("to-input").value = formatForInput(queryState.to);
+        document.getElementById("run-id-input").value = queryState.run_id;
+      }
+
+      function buildApiUrl() {
+        const params = new URLSearchParams();
+        if (queryState.from) {
+          params.set("from", queryState.from);
+        }
+        if (queryState.to) {
+          params.set("to", queryState.to);
+        }
+        if (queryState.run_id) {
+          params.set("run_id", queryState.run_id);
+        }
+        const query = params.toString();
+        return `/observability/usage/live${query ? `?${query}` : ""}`;
+      }
+
+      function updatePageUrl() {
+        const params = new URLSearchParams();
+        if (queryState.from) {
+          params.set("from", queryState.from);
+        }
+        if (queryState.to) {
+          params.set("to", queryState.to);
+        }
+        if (queryState.run_id) {
+          params.set("run_id", queryState.run_id);
+        }
+        const query = params.toString();
+        const newUrl = `${window.location.pathname}${query ? `?${query}` : ""}`;
+        window.history.replaceState({}, "", newUrl);
+      }
+
+      async function loadSnapshot() {
+        try {
+          const response = await fetch(buildApiUrl(), { cache: "no-store" });
+          const snapshot = await response.json();
+          renderSnapshot(snapshot);
+        } catch (error) {
+          document.getElementById("status-text").innerHTML =
+            '<span class="warning">Dashboard refresh failed</span>';
+        }
+      }
+
+      document.getElementById("filter-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const fromValue = document.getElementById("from-input").value;
+        const toValue = document.getElementById("to-input").value;
+        const runIdValue = document.getElementById("run-id-input").value.trim();
+        queryState.from = fromValue ? new Date(fromValue).toISOString() : "";
+        queryState.to = toValue ? new Date(toValue).toISOString() : "";
+        queryState.run_id = runIdValue;
+        updatePageUrl();
+        loadSnapshot();
+      });
+
+      document.getElementById("clear-filters").addEventListener("click", () => {
+        queryState.from = "";
+        queryState.to = "";
+        queryState.run_id = "";
+        document.getElementById("from-input").value = "";
+        document.getElementById("to-input").value = "";
+        document.getElementById("run-id-input").value = "";
+        updatePageUrl();
+        loadSnapshot();
+      });
+
+      syncFormFromQuery();
+      loadSnapshot();
+      setInterval(loadSnapshot, 3000);
+    </script>
+  </body>
+</html>

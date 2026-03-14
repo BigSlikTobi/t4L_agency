@@ -19,7 +19,7 @@ There are currently 9 base SDK agent types and 3 localized runtime variants.
 | Article Data Agent | [`build_article_data_agent`](app/newsroom/agents.py) | `openai_model_article_data_agent` -> `gpt-5-mini-2025-08-07` | `lookup_article_content` | [`article_data_agent`](app/newsroom/prompts.yml) |
 | Team News Agent | [`build_team_news_agent`](app/newsroom/agents.py) | `openai_model_team_news_agent` -> `gpt-5-2025-08-07` | `digest_article_data` | [`team_news_agent`](app/newsroom/prompts.yml) |
 | Rundown Orchestrator Agent | [`build_rundown_orchestrator_agent`](app/newsroom/agents.py) | `openai_model_rundown_orchestrator_agent` -> `gpt-5.2-2025-12-11` | `analyze_team_news` | [`rundown_orchestrator_agent`](app/newsroom/prompts.yml) |
-| Team Update Agent | [`build_team_update_agent`](app/newsroom/agents.py) | `openai_model_team_update_agent` -> `gpt-5.2-2025-12-11` | `digest_article_data` | [`team_update_agent`](app/newsroom/prompts.yml) |
+| Team Update Agent | [`build_team_update_agent`](app/newsroom/agents.py) | `openai_model_team_update_agent` -> `gpt-5-mini-2025-08-07` | `digest_article_data` | [`team_update_agent`](app/newsroom/prompts.yml) |
 | Team Update Batch Agent | [`build_team_update_batch_agent`](app/newsroom/agents.py) | `openai_model_team_update_batch_agent` -> `gpt-5-mini-2025-08-07` | `build_team_update_package` | [`team_update_batch_agent`](app/newsroom/prompts.yml) |
 | Hourly Playlist Orchestrator Agent | [`build_hourly_playlist_orchestrator_agent`](app/newsroom/agents.py) | `openai_model_hourly_playlist_orchestrator_agent` -> `gpt-5.2-2025-12-11` | none | [`hourly_playlist_orchestrator_agent`](app/newsroom/prompts.yml) |
 | Hourly Narrative Planner Agent | [`build_hourly_narrative_planner_agent`](app/newsroom/agents.py) | `openai_model_hourly_narrative_planner_agent` -> `gpt-5.4-2026-03-05` | none | [`hourly_narrative_planner_agent`](app/newsroom/prompts.yml) |
@@ -209,7 +209,7 @@ Guardrails:
 - Builder: [`build_team_update_agent`](app/newsroom/agents.py)
 - Model: `settings.agent_model("team_update_agent")`
 - Default config key: `openai_model_team_update_agent`
-- Default value: `gpt-5.2-2025-12-11`
+- Default value: `gpt-5-mini-2025-08-07`
 - Tool: `digest_article_data`
 - Prompt: [`team_update_agent`](app/newsroom/prompts.yml)
 - Output schema: `TeamUpdatePackage`

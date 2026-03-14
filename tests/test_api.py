@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -22,6 +23,89 @@ from app.schemas import (
     TeamUpdatePackage,
     TeamUpdateReport,
 )
+
+
+class FakeTelemetry:
+    enabled = True
+    last_filters = None
+
+    def dashboard_snapshot(self, *, from_time=None, to_time=None, run_id=None):
+        self.last_filters = {
+            "from_time": from_time,
+            "to_time": to_time,
+            "run_id": run_id,
+        }
+        return {
+            "status": "ok",
+            "telemetry_enabled": True,
+            "export_configured": False,
+            "generated_at": datetime.now(UTC),
+            "totals": {
+                "requests": 2,
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cached_input_tokens": 10,
+                "reasoning_tokens": 4,
+                "total_tokens": 150,
+                "estimated_cost_usd": 0.1234,
+            },
+            "active_runs": [
+                {
+                    "run_id": "run-123",
+                    "workflow": "NFL Radio Agency",
+                    "stage": "team_update_batch_agent",
+                    "started_at": datetime.now(UTC),
+                }
+            ],
+            "active_runs_by_stage": {"team_update_batch_agent": 1},
+            "usage_by_agent": [
+                {
+                    "key": "Team Update Batch Agent",
+                    "requests": 2,
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cached_input_tokens": 10,
+                    "reasoning_tokens": 4,
+                    "total_tokens": 150,
+                    "estimated_cost_usd": 0.1234,
+                }
+            ],
+            "usage_by_model": [
+                {
+                    "key": "gpt-5-mini-2025-08-07",
+                    "requests": 2,
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cached_input_tokens": 10,
+                    "reasoning_tokens": 4,
+                    "total_tokens": 150,
+                    "estimated_cost_usd": 0.1234,
+                }
+            ],
+            "recent_events": [
+                {
+                    "occurred_at": datetime.now(UTC),
+                    "workflow": "NFL Radio Agency",
+                    "run_id": "run-123",
+                    "stage": "team_update_batch_agent",
+                    "agent_name": "Team Update Batch Agent",
+                    "model": "gpt-5-mini-2025-08-07",
+                    "provider": "openai",
+                    "requests": 1,
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cached_input_tokens": 10,
+                    "reasoning_tokens": 4,
+                    "total_tokens": 150,
+                    "estimated_cost_usd": 0.1234,
+                }
+            ],
+            "applied_filters": {
+                "from": from_time.isoformat() if from_time is not None else None,
+                "to": to_time.isoformat() if to_time is not None else None,
+                "run_id": run_id,
+            },
+        }
 
 
 class FakeOrchestrator:
@@ -370,6 +454,64 @@ def test_qa_player_page_loads() -> None:
     assert response.status_code == 200
     assert "QA Radio Player" in response.text
     assert "/qa/player-feed" in response.text
+
+
+def test_qa_player_feed_route_runs_synchronously() -> None:
+    app = create_app(settings=build_settings(), orchestrator=FakeOrchestrator())
+    route = next(route for route in app.router.routes if getattr(route, "path", None) == "/qa/player-feed")
+
+    assert inspect.iscoroutinefunction(route.endpoint) is False
+
+
+def test_usage_dashboard_page_loads() -> None:
+    app = create_app(settings=build_settings(), orchestrator=FakeOrchestrator())
+    client = TestClient(app)
+
+    response = client.get("/observability/usage")
+
+    assert response.status_code == 200
+    assert "T4L Local Usage Dashboard" in response.text
+    assert "/observability/usage/live" in response.text
+
+
+def test_usage_dashboard_live_returns_snapshot() -> None:
+    app = create_app(settings=build_settings(), orchestrator=FakeOrchestrator())
+    fake_telemetry = FakeTelemetry()
+
+    with TestClient(app) as client:
+        app.state.telemetry = fake_telemetry
+        response = client.get("/observability/usage/live")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["totals"]["total_tokens"] == 150
+    assert payload["usage_by_agent"][0]["key"] == "Team Update Batch Agent"
+    assert payload["recent_events"][0]["run_id"] == "run-123"
+    assert payload["applied_filters"]["run_id"] is None
+
+
+def test_usage_dashboard_live_forwards_filters() -> None:
+    app = create_app(settings=build_settings(), orchestrator=FakeOrchestrator())
+    fake_telemetry = FakeTelemetry()
+
+    with TestClient(app) as client:
+        app.state.telemetry = fake_telemetry
+        response = client.get(
+            "/observability/usage/live",
+            params={
+                "from": "2026-03-14T10:00:00Z",
+                "to": "2026-03-14T12:00:00Z",
+                "run_id": "run-123",
+            },
+        )
+
+    assert response.status_code == 200
+    assert fake_telemetry.last_filters is not None
+    assert fake_telemetry.last_filters["run_id"] == "run-123"
+    assert fake_telemetry.last_filters["from_time"].isoformat() == "2026-03-14T10:00:00+00:00"
+    assert fake_telemetry.last_filters["to_time"].isoformat() == "2026-03-14T12:00:00+00:00"
+    payload = response.json()
+    assert payload["applied_filters"]["run_id"] == "run-123"
 
 
 def test_qa_player_feed_prefers_latest_scripts_artifact(tmp_path: Path) -> None:

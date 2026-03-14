@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
@@ -13,6 +14,7 @@ from app.cli import app as cli_app
 from app.history import TeamUpdateHistoryStore
 from app.newsroom.context import TeamUpdateRunContext
 from app.newsroom.helpers import apply_hourly_narrative_plan, build_hourly_script_batch_input
+from app.telemetry import configure_telemetry
 from app.newsroom.workflow import TeamUpdateWorkflow
 from app.schemas import (
     ArticleContentLookupToolResponse,
@@ -2036,12 +2038,16 @@ async def test_hourly_playlist_scripts_use_latest_saved_playlist_and_persist_scr
         )
 
     monkeypatch.setattr("app.newsroom.workflow_team_update.Runner.run", fake_runner)
-
-    response = await workflow.run_hourly_playlist_scripts(
-        script_run_id="script-run-1",
-        generated_at=generated_at,
-        request=HourlyPlaylistScriptsRequest(),
-    )
+    telemetry = configure_telemetry(build_settings(tmp_path).model_copy(update={"telemetry_enabled": True}))
+    try:
+        response = await workflow.run_hourly_playlist_scripts(
+            script_run_id="script-run-1",
+            generated_at=generated_at,
+            request=HourlyPlaylistScriptsRequest(),
+        )
+        usage_snapshot = telemetry.dashboard_snapshot(run_id="script-run-1")
+    finally:
+        telemetry.close()
 
     saved_scripts = workflow._history_store.list_story_scripts(script_run_id="script-run-1")
     saved_narrative_plans = workflow._history_store.list_hourly_narrative_plans(script_run_id="script-run-1")
@@ -2062,6 +2068,9 @@ async def test_hourly_playlist_scripts_use_latest_saved_playlist_and_persist_scr
     assert tts_batch.create_calls[0]["items"][0]["script"]["body"] == "Body"
     assert tts_batch.status_calls[0]["batch_id"] == "batches/abc123"
     assert tts_batch.process_calls[0]["supabase"]["bucket"] == "audio"
+    assert usage_snapshot["usage_by_agent"][0]["key"] == "Gemini TTS Batch"
+    assert usage_snapshot["usage_by_model"][0]["key"] == "gemini-2.5-pro-preview-tts"
+    assert usage_snapshot["recent_events"][0]["provider"] == "google"
 
 
 @pytest.mark.asyncio
@@ -2422,6 +2431,48 @@ def test_team_update_cli_command(monkeypatch: pytest.MonkeyPatch) -> None:
     assert payload["reports"][0]["team"] == "MIN"
     assert payload["reports"][0]["status"] == "no_update"
     assert payload["hourly_playlist"]["selected_count"] == 0
+
+
+def test_team_update_cli_closes_orchestrator_on_same_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeTelemetry:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeOrchestrator:
+        def __init__(self) -> None:
+            self.run_loop = None
+            self.closed = False
+
+        async def run_team_update_reports(self, request):
+            self.run_loop = asyncio.get_running_loop()
+            return TeamUpdateBatchResponse(
+                run_id="batch-run-1",
+                generated_at=datetime.now(UTC),
+                lookback_minutes=request.lookback_minutes,
+                reports=[
+                    make_team_update_report(team="MIN", lookback_minutes=request.lookback_minutes)
+                ],
+                hourly_playlist=HourlyPlaylist(selected_count=0, items=[]),
+            )
+
+        async def close(self) -> None:
+            assert asyncio.get_running_loop() is self.run_loop
+            self.closed = True
+
+    telemetry = FakeTelemetry()
+    orchestrator = FakeOrchestrator()
+    monkeypatch.setattr("app.cli._build_runtime", lambda: (object(), telemetry, orchestrator))
+
+    result = CliRunner().invoke(cli_app, ["team-update", "--team", "MIN"])
+
+    assert result.exit_code == 0
+    assert orchestrator.closed is True
+    assert telemetry.closed is True
 
 
 def test_team_update_cli_command_accepts_bracketed_team_list(

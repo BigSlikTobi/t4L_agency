@@ -27,6 +27,7 @@ from app.constants import (
     NFL_TEAMS,
     SCRIPT_LANGUAGE_CONFIGS,
     ScriptPersona,
+    WORKFLOW_NAME,
 )
 from app.history import TeamUpdateHistoryStore
 from app.newsroom.agents import (
@@ -60,6 +61,7 @@ from app.newsroom.tools import (
     build_team_update_tool,
 )
 from app.newsroom.tracing import build_run_config
+from app.telemetry import get_active_telemetry_manager
 from app.schemas import (
     ArticleContentLookupToolResponse,
     ArticleDigest,
@@ -843,6 +845,11 @@ class TeamUpdateWorkflow:
                 settings=self._settings,
             )
         )
+        self._record_tts_batch_usage(
+            script_run_id=script_run_id,
+            batch_status=completed_batch,
+            processed_batch=processed_batch,
+        )
         if processed_batch.processed_count <= 0:
             raise ValueError(
                 f"TTS batch {processed_batch.batch_id} completed without any processed audio items."
@@ -889,6 +896,38 @@ class TeamUpdateWorkflow:
         if self._settings.gemini_api_key is None:
             return None
         return GeminiTTSCredentials(gemini=self._settings.gemini_api_key.get_secret_value())
+
+    def _record_tts_batch_usage(
+        self,
+        *,
+        script_run_id: str,
+        batch_status: GeminiTTSBatchJobStatus,
+        processed_batch,
+    ) -> None:
+        telemetry = get_active_telemetry_manager()
+        if telemetry is None:
+            return
+        token_usage = processed_batch.token_usage
+        input_tokens = int(token_usage.input_tokens or 0)
+        output_tokens = int(token_usage.output_tokens or 0)
+        cached_input_tokens = int(token_usage.cached_input_tokens or 0)
+        total_tokens = int(token_usage.total_tokens or (input_tokens + output_tokens))
+        if total_tokens <= 0 and input_tokens <= 0 and output_tokens <= 0:
+            return
+        telemetry.record_external_usage(
+            workflow=WORKFLOW_NAME,
+            run_id=script_run_id,
+            stage="gemini_tts_batch",
+            agent_name="Gemini TTS Batch",
+            provider="google",
+            model=getattr(batch_status, "model_name", None) or self._settings.gemini_tts_batch_model_name,
+            requests=1,
+            input_tokens=input_tokens,
+            cached_input_tokens=cached_input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            batch_mode=True,
+        )
 
 
 # ---------------------------------------------------------------------------
