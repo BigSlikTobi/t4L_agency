@@ -7,13 +7,15 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from typing import Awaitable, TypeVar
 
 import typer
 
 from app.constants import DEFAULT_SCRIPT_LANGUAGE, NFL_TEAMS
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.logging_config import configure_logging
 from app.orchestration import build_default_orchestrator
+from app.telemetry import TelemetryManager, configure_telemetry
 from app.schemas import (
     HourlyPlaylistScriptsRequest,
     RadioRundownRequest,
@@ -28,6 +30,36 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 app = typer.Typer(help="Generate a structured NFL radio show rundown.")
+RunResultT = TypeVar("RunResultT")
+
+
+def _build_runtime() -> tuple[object, TelemetryManager, object]:
+    settings = get_settings()
+    if isinstance(settings, Settings):
+        telemetry = configure_telemetry(settings)
+    else:
+        telemetry = TelemetryManager(enabled=False)
+    orchestrator = build_default_orchestrator(settings)
+    return settings, telemetry, orchestrator
+
+
+async def _close_runtime(orchestrator: object, telemetry: TelemetryManager) -> None:
+    try:
+        if hasattr(orchestrator, "close"):
+            await orchestrator.close()
+    finally:
+        telemetry.close()
+
+
+async def _run_with_runtime_cleanup(
+    orchestrator: object,
+    telemetry: TelemetryManager,
+    awaitable: Awaitable[RunResultT],
+) -> RunResultT:
+    try:
+        return await awaitable
+    finally:
+        await _close_runtime(orchestrator, telemetry)
 
 
 @app.callback()
@@ -53,9 +85,14 @@ def run_rundown(
         max_segments=max_segments,
         teams=teams,
     )
-    settings = get_settings()
-    orchestrator = build_default_orchestrator(settings)
-    rundown = asyncio.run(orchestrator.run_radio_rundown(request))
+    _settings, telemetry, orchestrator = _build_runtime()
+    rundown = asyncio.run(
+        _run_with_runtime_cleanup(
+            orchestrator,
+            telemetry,
+            orchestrator.run_radio_rundown(request),
+        )
+    )
 
     typer.echo(
         f"Run {rundown.run_id} | {rundown.target_duration_minutes} minute show | "
@@ -97,13 +134,16 @@ def run_team_update(
     output_json: Path | None = typer.Option(None),
 ) -> None:
     team_codes = _parse_team_update_targets(teams)
-    settings = get_settings()
-    orchestrator = build_default_orchestrator(settings)
+    _settings, telemetry, orchestrator = _build_runtime()
     reports = asyncio.run(
-        orchestrator.run_team_update_reports(
-            TeamUpdateBatchRequest(
-                teams=team_codes,
-                lookback_minutes=lookback_minutes,
+        _run_with_runtime_cleanup(
+            orchestrator,
+            telemetry,
+            orchestrator.run_team_update_reports(
+                TeamUpdateBatchRequest(
+                    teams=team_codes,
+                    lookback_minutes=lookback_minutes,
+                )
             )
         )
     )
@@ -135,14 +175,17 @@ def run_write_scripts(
     ),
     output_json: Path | None = typer.Option(None),
 ) -> None:
-    settings = get_settings()
-    orchestrator = build_default_orchestrator(settings)
+    _settings, telemetry, orchestrator = _build_runtime()
     response = asyncio.run(
-        orchestrator.run_hourly_playlist_scripts(
-            HourlyPlaylistScriptsRequest(
-                playlist_id=playlist_id,
-                language=language,
-                enable_tts=not no_tts,
+        _run_with_runtime_cleanup(
+            orchestrator,
+            telemetry,
+            orchestrator.run_hourly_playlist_scripts(
+                HourlyPlaylistScriptsRequest(
+                    playlist_id=playlist_id,
+                    language=language,
+                    enable_tts=not no_tts,
+                )
             )
         )
     )

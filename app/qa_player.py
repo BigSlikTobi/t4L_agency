@@ -148,7 +148,7 @@ def _apply_batch_override(feed: QAPlayerFeed, settings: Settings, batch: str) ->
     )
 
 
-async def _load_batch_manifest_feed(settings: Settings, batch: str) -> QAPlayerFeed | None:
+def _load_batch_manifest_feed(settings: Settings, batch: str) -> QAPlayerFeed | None:
     normalized_batch = _normalize_batch_path(batch, settings)
     if not normalized_batch:
         return None
@@ -159,8 +159,7 @@ async def _load_batch_manifest_feed(settings: Settings, batch: str) -> QAPlayerF
     )
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(manifest_url)
+        response = httpx.get(manifest_url, timeout=10.0)
         response.raise_for_status()
         manifest_payload = json.loads(response.text)
         manifest_items = [

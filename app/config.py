@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -43,7 +44,7 @@ class Settings(BaseSettings):
     openai_model_article_data_agent: str = "gpt-5-mini-2025-08-07"
     openai_model_team_news_agent: str = "gpt-5-2025-08-07"
     openai_model_rundown_orchestrator_agent: str = "gpt-5.2-2025-12-11"
-    openai_model_team_update_agent: str = "gpt-5.2-2025-12-11"
+    openai_model_team_update_agent: str = "gpt-5-mini-2025-08-07"
     openai_model_team_update_batch_agent: str = "gpt-5-mini-2025-08-07"
     openai_model_hourly_playlist_orchestrator_agent: str = "gpt-5.2-2025-12-11"
     openai_model_radio_script_writer_agent: str = "gpt-5.1-2025-11-13"
@@ -56,6 +57,13 @@ class Settings(BaseSettings):
     openai_max_tokens: int | None = None
 
     news_timeout_seconds: float = 15.0
+    telemetry_enabled: bool = False
+    telemetry_project_name: str = "t4l-radio-agency"
+    telemetry_environment: str = "local"
+    telemetry_instance_id: str = ""
+    otel_exporter_otlp_endpoint: str | None = None
+    otel_exporter_otlp_headers: str | None = None
+    telemetry_capture_content: bool = False
 
     @model_validator(mode="after")
     def validate_supabase_urls(self) -> "Settings":
@@ -77,6 +85,11 @@ class Settings(BaseSettings):
             "supabase_storage_bucket": self.supabase_storage_bucket,
             "supabase_storage_path_prefix": self.supabase_storage_path_prefix,
             "team_update_history_sqlite_path": str(self.team_update_history_sqlite_path),
+            "telemetry_enabled": str(self.telemetry_enabled).lower(),
+            "telemetry_project_name": self.telemetry_project_name,
+            "telemetry_environment": self.telemetry_environment,
+            "telemetry_instance_id": self.resolved_telemetry_instance_id(),
+            "otel_exporter_otlp_endpoint": self.otel_exporter_otlp_endpoint or "unconfigured",
         }
 
     def model_summary(self) -> dict[str, str]:
@@ -129,6 +142,11 @@ class Settings(BaseSettings):
             "TTS batch processing requires SUPABASE_STORAGE_KEY or SUPABASE_SERVICE_ROLE_KEY "
             "for Supabase Storage uploads."
         )
+
+    def resolved_telemetry_instance_id(self) -> str:
+        if self.telemetry_instance_id.strip():
+            return self.telemetry_instance_id.strip()
+        return os.environ.get("HOSTNAME") or os.environ.get("COMPUTERNAME") or "local-instance"
 
 
 @lru_cache(maxsize=1)

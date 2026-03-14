@@ -178,6 +178,65 @@ class HealthStatus(BaseModel):
     external_services: dict[str, str]
 
 
+class UsageTelemetryTotals(BaseModel):
+    requests: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0
+    reasoning_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+
+
+class UsageTelemetryBreakdown(BaseModel):
+    key: str
+    requests: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0
+    reasoning_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+
+
+class UsageTelemetryActiveRun(BaseModel):
+    run_id: str
+    workflow: str
+    stage: str
+    started_at: datetime
+
+
+class UsageTelemetryEvent(BaseModel):
+    occurred_at: datetime
+    workflow: str
+    run_id: str
+    stage: str
+    agent_name: str
+    model: str
+    provider: str
+    requests: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0
+    reasoning_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+
+
+class UsageTelemetrySnapshot(BaseModel):
+    status: Literal["ok"]
+    telemetry_enabled: bool
+    export_configured: bool
+    generated_at: datetime
+    totals: UsageTelemetryTotals = Field(default_factory=UsageTelemetryTotals)
+    active_runs: list[UsageTelemetryActiveRun] = Field(default_factory=list)
+    active_runs_by_stage: dict[str, int] = Field(default_factory=dict)
+    usage_by_agent: list[UsageTelemetryBreakdown] = Field(default_factory=list)
+    usage_by_model: list[UsageTelemetryBreakdown] = Field(default_factory=list)
+    recent_events: list[UsageTelemetryEvent] = Field(default_factory=list)
+    applied_filters: dict[str, str | None] = Field(default_factory=dict)
+
+
 class StoredArticleRecord(BaseModel):
     url: str
     cite_url: str | None = None

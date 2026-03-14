@@ -1,0 +1,28 @@
+otelcol.receiver.otlp "t4l" {
+  http {}
+  grpc {}
+
+  output {
+    metrics = [otelcol.processor.batch.t4l.input]
+    traces  = [otelcol.processor.batch.t4l.input]
+  }
+}
+
+otelcol.processor.batch "t4l" {
+  output {
+    metrics = [prometheus.remote_write.local.receiver]
+    traces  = [otelcol.exporter.otlphttp.tempo.input]
+  }
+}
+
+prometheus.remote_write "local" {
+  endpoint {
+    url = "http://localhost:9009/api/v1/push"
+  }
+}
+
+otelcol.exporter.otlphttp "tempo" {
+  client {
+    endpoint = "http://localhost:4318"
+  }
+}

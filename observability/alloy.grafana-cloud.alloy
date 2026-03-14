@@ -1,0 +1,35 @@
+otelcol.receiver.otlp "t4l" {
+  http {}
+  grpc {}
+
+  output {
+    metrics = [otelcol.processor.batch.t4l.input]
+    traces  = [otelcol.processor.batch.t4l.input]
+  }
+}
+
+otelcol.processor.batch "t4l" {
+  output {
+    metrics = [prometheus.remote_write.grafana.receiver]
+    traces  = [otelcol.exporter.otlphttp.grafana_traces.input]
+  }
+}
+
+prometheus.remote_write "grafana" {
+  endpoint {
+    url = env("GRAFANA_CLOUD_METRICS_URL")
+    basic_auth {
+      username = env("GRAFANA_CLOUD_METRICS_USER")
+      password = env("GRAFANA_CLOUD_METRICS_API_KEY")
+    }
+  }
+}
+
+otelcol.exporter.otlphttp "grafana_traces" {
+  client {
+    endpoint = env("GRAFANA_CLOUD_TRACES_URL")
+    headers = {
+      "Authorization" = "Basic " + env("GRAFANA_CLOUD_TRACES_AUTH")
+    }
+  }
+}
