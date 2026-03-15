@@ -10,7 +10,6 @@ from agents import Runner
 from app.adapters import NewsFeedAdapter, SupabaseArticleLookupAdapter
 from app.config import Settings
 from app.newsroom.agents import (
-    build_article_data_agent,
     build_rundown_orchestrator_agent,
     build_team_news_agent,
 )
@@ -46,11 +45,7 @@ class AgentsWorkflow:
         os.environ.setdefault("OPENAI_API_KEY", settings.openai_api_key.get_secret_value())
 
         self.article_lookup_tool = build_article_lookup_tool(article_lookup)
-        self.article_data_agent = build_article_data_agent(
-            settings,
-            article_lookup_tool=self.article_lookup_tool,
-        )
-        self.article_data_tool = build_article_data_tool(self.article_data_agent)
+        self.article_data_tool = build_article_data_tool(article_lookup, settings)
 
         self.team_agent = build_team_news_agent(
             settings,

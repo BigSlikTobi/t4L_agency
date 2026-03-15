@@ -17,8 +17,8 @@ from app.schemas import (
     RadioRundownDraft,
     RadioStoryScriptDraft,
     TeamAnalysisResult,
-    TeamUpdateBatchAgentResult,
-    TeamUpdatePackage,
+    TeamUpdateAgentResult,
+    TeamUpdateBatchAgentTransportResult,
 )
 
 
@@ -83,7 +83,7 @@ def build_team_update_agent(
         model=settings.agent_model("team_update_agent"),
         model_settings=build_model_settings(settings, parallel_tool_calls=True),
         tools=[article_data_tool],
-        output_type=TeamUpdatePackage,
+        output_type=TeamUpdateAgentResult,
     )
 
 
@@ -98,7 +98,7 @@ def build_team_update_batch_agent(
         model=settings.agent_model("team_update_batch_agent"),
         model_settings=build_model_settings(settings, parallel_tool_calls=True),
         tools=[team_update_tool],
-        output_type=TeamUpdateBatchAgentResult,
+        output_type=TeamUpdateBatchAgentTransportResult,
     )
 
 

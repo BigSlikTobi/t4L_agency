@@ -20,6 +20,7 @@ from app.newsroom.helpers import (
     capture_selected_story_coverage,
     capture_source_usage,
     coerce_output,
+    coerce_response_output,
     filter_stories_for_team,
     selected_teams,
 )
@@ -32,6 +33,7 @@ from app.schemas import (
     SegmentCandidate,
     SourceArticleRef,
     TeamAnalysisResult,
+    TeamUpdateGateResult,
     TeamStoryCandidate,
 )
 
@@ -102,50 +104,78 @@ def test_agents_module_imports_sdk_symbols_at_top_level() -> None:
 def test_sdk_agents_are_real_agent_instances() -> None:
     workflow = build_workflow()
 
-    assert isinstance(workflow.article_data_agent, Agent)
     assert isinstance(workflow.team_agent, Agent)
     assert isinstance(workflow.orchestrator_agent, Agent)
-    assert [tool.name for tool in workflow.article_data_agent.tools] == ["lookup_article_content"]
     assert workflow.article_lookup_tool.name == "lookup_article_content"
+    assert workflow.article_data_tool.name == "digest_article_data"
     assert [tool.name for tool in workflow.team_agent.tools] == ["digest_article_data"]
     assert [tool.name for tool in workflow.orchestrator_agent.tools] == ["analyze_team_news"]
 
 
-def test_article_data_agent_uses_supabase_prompt() -> None:
-    workflow = build_workflow()
+def test_article_data_direct_prompt_exists() -> None:
+    from app.newsroom.prompts import load_prompts
 
-    assert workflow.article_lookup_tool.name == "lookup_article_content"
-    assert [tool.name for tool in workflow.article_data_agent.tools] == ["lookup_article_content"]
-    assert "stored article data from Supabase" in workflow.article_data_agent.instructions
+    prompts = load_prompts()
+    assert "article_data_direct" in prompts
+    assert "article content provided below" in prompts["article_data_direct"]
 
 
 @pytest.mark.asyncio
-async def test_article_data_tool_uses_auto_previous_response_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    workflow = build_workflow()
-    tool = build_article_data_tool(workflow.article_data_agent)
+async def test_article_data_tool_direct_call_returns_digest(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.schemas import ArticleContentLookupToolResponse, StoredArticleRecord
+
+    settings = build_settings()
+
+    class FakeLookup:
+        async def lookup_article(self, url: str):
+            return ArticleContentLookupToolResponse(
+                requested_url=url,
+                found=True,
+                article=StoredArticleRecord(
+                    url=url,
+                    content="Article body with enough words for testing.",
+                    header="Header",
+                    description="Deck",
+                    quotes=[],
+                    group_id="group-1",
+                ),
+            )
+
+    tool = build_article_data_tool(FakeLookup(), settings)
+
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        output_text = ""
+        output_parsed = ArticleDigestAgentResult(
+            summary="Direct summary",
+            key_facts=["Fact 1"],
+            confidence=0.9,
+            content_status="full",
+        )
+        output = []
+
+    async def fake_parse(**kwargs):
+        captured["model"] = kwargs.get("model")
+        captured["instructions"] = kwargs.get("instructions")
+        captured["text_format"] = kwargs.get("text_format")
+        captured["max_output_tokens"] = kwargs.get("max_output_tokens")
+        captured["reasoning"] = kwargs.get("reasoning")
+        return FakeResponse()
+
+    monkeypatch.setattr("app.newsroom.tools.AsyncOpenAI", lambda **kw: SimpleNamespace(
+        responses=SimpleNamespace(parse=fake_parse)
+    ))
+
+    # Rebuild tool after monkeypatch
+    tool = build_article_data_tool(FakeLookup(), settings)
+
     context = ToolContext(
         context=build_context(),
         tool_name=tool.name,
         tool_call_id="call-1",
         tool_arguments="{}",
     )
-    captured: dict[str, object] = {}
-
-    async def fake_runner(agent, message, **kwargs):
-        captured["agent_name"] = agent.name
-        captured["message"] = message
-        captured["auto_previous_response_id"] = kwargs.get("auto_previous_response_id")
-        captured["context"] = kwargs.get("context")
-        return SimpleNamespace(
-            final_output=ArticleDigestAgentResult(
-                summary="Stored summary",
-                key_facts=["Fact 1"],
-                confidence=0.9,
-                content_status="full",
-            )
-        )
-
-    monkeypatch.setattr("app.newsroom.tools.Runner.run", fake_runner)
 
     result = await tool.on_invoke_tool(
         context,
@@ -161,16 +191,45 @@ async def test_article_data_tool_uses_auto_previous_response_id(monkeypatch: pyt
         ),
     )
 
-    assert result["summary"] == "Stored summary"
-    assert captured == {
-        "agent_name": "Article Data Agent",
-        "message": (
-            '{"story_id":"story-1","url":"https://example.com/story-1","title":"Story 1",'
-            '"source_name":"ESPN","category":"Breaking News","team_mentions":["ARI"]}'
-        ),
-        "auto_previous_response_id": True,
-        "context": context.context,
-    }
+    assert result["summary"] == "Direct summary"
+    assert captured["model"] == settings.agent_model("article_data_agent")
+    assert captured["text_format"] is ArticleDigestAgentResult
+    assert captured["max_output_tokens"] == 800
+    assert captured["reasoning"] == {"effort": "minimal"}
+
+
+def test_coerce_response_output_prefers_parsed_payload_when_output_text_is_blank() -> None:
+    response = SimpleNamespace(
+        output_parsed=TeamUpdateGateResult(decision="go"),
+        output_text="",
+        output=[],
+    )
+
+    result = coerce_response_output(response, TeamUpdateGateResult)
+
+    assert result.decision == "go"
+
+
+def test_coerce_response_output_falls_back_to_message_content_when_output_text_is_blank() -> None:
+    response = SimpleNamespace(
+        output_text="",
+        output=[
+            SimpleNamespace(
+                type="message",
+                content=[
+                    SimpleNamespace(
+                        type="output_text",
+                        text='{"decision":"no_update","skip_reason":"No airworthy update"}',
+                    )
+                ],
+            )
+        ],
+    )
+
+    result = coerce_response_output(response, TeamUpdateGateResult)
+
+    assert result.decision == "no_update"
+    assert result.skip_reason == "No airworthy update"
 
 
 def test_closed_world_rules_are_present_in_narrative_prompts() -> None:
@@ -252,8 +311,6 @@ def test_german_script_prompts_are_present_and_localized() -> None:
 def test_model_settings_omit_temperature_and_max_tokens_by_default() -> None:
     workflow = build_workflow()
 
-    assert workflow.article_data_agent.model_settings.temperature is None
-    assert workflow.article_data_agent.model_settings.max_tokens == 800
     assert workflow.team_agent.model_settings.temperature is None
     assert workflow.team_agent.model_settings.max_tokens is None
     assert workflow.orchestrator_agent.model_settings.temperature is None
@@ -277,7 +334,6 @@ def test_agents_workflow_uses_agent_specific_model_overrides() -> None:
         article_lookup=FakeArticleLookupAdapter(),
     )
 
-    assert workflow.article_data_agent.model == "article-model"
     assert workflow.team_agent.model == "team-model"
     assert workflow.orchestrator_agent.model == "rundown-model"
 

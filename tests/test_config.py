@@ -50,6 +50,7 @@ def test_agent_models_fall_back_to_shared_role_models() -> None:
             "openai_model_article_data_agent": "",
             "openai_model_team_news_agent": "",
             "openai_model_rundown_orchestrator_agent": "",
+            "openai_model_team_update_gate": "",
             "openai_model_team_update_agent": "",
             "openai_model_team_update_batch_agent": "",
             "openai_model_hourly_playlist_orchestrator_agent": "",
@@ -61,6 +62,7 @@ def test_agent_models_fall_back_to_shared_role_models() -> None:
     assert settings.agent_model("article_data_agent") == "research-model"
     assert settings.agent_model("team_news_agent") == "analyst-model"
     assert settings.agent_model("rundown_orchestrator_agent") == "chief-model"
+    assert settings.agent_model("team_update_gate") == "analyst-model"
     assert settings.agent_model("team_update_agent") == "analyst-model"
     assert settings.agent_model("team_update_batch_agent") == "chief-model"
     assert settings.agent_model("hourly_playlist_orchestrator_agent") == "chief-model"

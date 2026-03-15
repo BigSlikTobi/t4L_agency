@@ -212,14 +212,15 @@ Guardrails:
 - Default value: `gpt-5-mini-2025-08-07`
 - Tool: `digest_article_data`
 - Prompt: [`team_update_agent`](app/newsroom/prompts.yml)
-- Output schema: `TeamUpdatePackage`
+- Output schema: `TeamUpdateAgentResult`
 - Primary role: build one 180-second team update production brief from pre-gated candidate stories
 
 What it does:
 
 - Receives one team and its deterministic candidate list.
 - Calls `digest_article_data` exactly once per candidate story.
-- Produces a single package with exactly one topic and unified narrative.
+- Returns `report_ready` with a single package when at least one concrete, team-specific, verifiable update survives digestion.
+- Returns `no_update` when the candidates do not support a real on-air update.
 
 Handoff:
 
@@ -229,9 +230,11 @@ Handoff:
 Guardrails:
 
 - Candidate list is pre-gated before the agent runs
+- Deterministically unusable stored article bodies are dropped before the agent sees them
 - Output is a production brief, not final script copy
 - Must explain what changed when framing is `update`
 - Must include source articles that support the central narrative
+- Must never produce a meta-package whose real message is missing verification or empty digests
 
 ### 5. Team Update Batch Agent
 
@@ -242,14 +245,16 @@ Guardrails:
 - Default value: `gpt-5-mini-2025-08-07`
 - Tool: `build_team_update_package`
 - Prompt: [`team_update_batch_agent`](app/newsroom/prompts.yml)
-- Output schema: `TeamUpdateBatchAgentResult`
+- Output schema: `TeamUpdateBatchAgentTransportResult`
 - Primary role: orchestrate batch team update generation across many teams
 
 What it does:
 
 - Receives prepared per-team objects in batch order.
 - Calls `build_team_update_package` exactly once for each team with candidates.
+- Propagates `no_update` when the nested team-update result says a team is not airworthy.
 - Returns one report entry per input team and preserves order.
+- Workflow normalization converts the transport payload into strict `TeamUpdateBatchAgentResult` objects before persistence and playlist creation.
 
 Handoff:
 
@@ -260,7 +265,9 @@ Handoff:
 Guardrails:
 
 - Teams with zero candidates must return `no_update`
+- Teams with candidates may still return `no_update` if no verifiable update remains after digestion
 - Output order must match input order
+- Nested `report` payloads must be copied exactly from `build_team_update_package` tool results
 - Chunking is deterministic via `team_update_batch_chunk_size`
 - Batch reports are validated before persistence and playlist creation
 
@@ -289,6 +296,7 @@ Handoff:
 
 Guardrails:
 
+- Eligible reports are real reportable updates only; skipped teams never reach this stage
 - If fewer than 10 eligible reports exist, include all of them
 - If 10 or more exist, return 10 to 15 items
 - Rank starts at 1 with no gaps
@@ -394,7 +402,7 @@ This section answers one narrow question clearly: when one agent depends on anot
 | --- | --- | --- | --- |
 | `Rundown Orchestrator Agent` | `analyze_team_news` | `Team News Agent` | Score one team's candidate stories before the final show rundown is assembled |
 | `Team News Agent` | `digest_article_data` | `Article Data Agent` | Turn each source article into a structured digest before assigning team-level relevance |
-| `Team Update Batch Agent` | `build_team_update_package` | `Team Update Agent` | Produce one team update package per team inside a batch run |
+| `Team Update Batch Agent` | `build_team_update_package` | `Team Update Agent` | Produce one team update package per team inside a batch run, or return `no_update` when nothing airworthy survives digestion |
 | `Team Update Agent` | `digest_article_data` | `Article Data Agent` | Ground each candidate update story in article-level facts before writing the package |
 | `Hourly Script Batch Agent` | `build_radio_story_script` | `Radio Script Writer Agent` | Write one radio segment per selected playlist story |
 | `Radio Script Writer Agent` | `digest_article_data` | `Article Data Agent` | Re-digest each source article so final script copy stays source-grounded |
@@ -485,14 +493,14 @@ sequenceDiagram
     participant HPO as Hourly Playlist Orchestrator Agent
 
     NF->>DET: fetch stories
-    DET->>DET: team filter + dedup + group updates + continuity
+    DET->>DET: team filter + dedup + article body gate + group updates + continuity
     DET->>TUB: prepared team payloads
     TUB->>TU: build_team_update_package(team)
     TU->>AD: digest_article_data(candidate)
     AD->>LU: lookup_article_content(url)
     LU-->>AD: stored article data
     AD-->>TU: article digest
-    TU-->>TUB: team package
+    TU-->>TUB: report_ready package or no_update
     TUB-->>HPO: eligible report summaries
     HPO-->>DET: ranked hourly playlist
     DET-->>DET: validate, save, mark reports put_to_production

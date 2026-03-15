@@ -346,6 +346,32 @@ class TeamUpdatePackage(BaseModel):
         return self
 
 
+class TeamUpdatePackageTransport(BaseModel):
+    total_duration_seconds: int = Field(default=180, ge=1)
+    headline: str
+    topics: list[TeamUpdateTopic] = Field(default_factory=list)
+    source_articles: list[SourceArticleRef] = Field(default_factory=list)
+
+
+class TeamUpdateGateResult(BaseModel):
+    decision: Literal["go", "no_update"]
+    skip_reason: str | None = None
+
+
+class TeamUpdateAgentResult(BaseModel):
+    status: Literal["report_ready", "no_update"]
+    report: TeamUpdatePackage | None = None
+    skip_reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_report_status(self) -> "TeamUpdateAgentResult":
+        if self.status == "report_ready" and self.report is None:
+            raise ValueError("report is required when status=report_ready")
+        if self.status == "no_update":
+            self.report = None
+        return self
+
+
 class TeamUpdateCoverage(BaseModel):
     total_feed_stories: int = Field(default=0, ge=0)
     team_feed_stories: int = Field(default=0, ge=0)
@@ -425,8 +451,47 @@ class TeamUpdateBatchAgentReport(BaseModel):
         return self
 
 
+class TeamUpdateBatchAgentTransportReport(BaseModel):
+    team: str
+    lookback_minutes: int = Field(ge=1, le=10080)
+    status: Literal["report_ready", "no_update"]
+    report: TeamUpdatePackageTransport | None = None
+
+    @field_validator("team")
+    @classmethod
+    def normalize_team(cls, value: str) -> str:
+        return TeamUpdateReportRequest(team=value).team
+
+    @model_validator(mode="after")
+    def validate_report_status(self) -> "TeamUpdateBatchAgentTransportReport":
+        if self.status == "report_ready" and self.report is None:
+            raise ValueError("report is required when status=report_ready")
+        if self.status == "no_update":
+            self.report = None
+        return self
+
+
 class TeamUpdateBatchAgentResult(BaseModel):
     reports: list[TeamUpdateBatchAgentReport] = Field(default_factory=list)
+
+
+class TeamUpdateBatchAgentTransportResult(BaseModel):
+    reports: list[TeamUpdateBatchAgentTransportReport] = Field(default_factory=list)
+
+
+class TeamUpdateBatchAgentNanoReport(BaseModel):
+    team: str
+    lookback_minutes: int = Field(ge=1, le=10080)
+    status: Literal["report_ready", "no_update"]
+
+    @field_validator("team")
+    @classmethod
+    def normalize_team(cls, value: str) -> str:
+        return TeamUpdateReportRequest(team=value).team
+
+
+class TeamUpdateBatchAgentNanoResult(BaseModel):
+    reports: list[TeamUpdateBatchAgentNanoReport] = Field(default_factory=list)
 
 
 class HourlyPlaylistItem(BaseModel):

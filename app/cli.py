@@ -176,6 +176,12 @@ def run_write_scripts(
     output_json: Path | None = typer.Option(None),
 ) -> None:
     _settings, telemetry, orchestrator = _build_runtime()
+    logger.info(
+        "Starting write-scripts command for language %s using %s playlist source (tts=%s)",
+        language,
+        playlist_id or "latest",
+        not no_tts,
+    )
     response = asyncio.run(
         _run_with_runtime_cleanup(
             orchestrator,
@@ -188,6 +194,11 @@ def run_write_scripts(
                 )
             )
         )
+    )
+    logger.info(
+        "Completed write-scripts command for language %s with %d generated items",
+        language,
+        len(response.items),
     )
     serialized = json.dumps(response.model_dump(mode="json"), indent=2, ensure_ascii=False)
     typer.echo(serialized)
