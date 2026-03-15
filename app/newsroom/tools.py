@@ -85,6 +85,15 @@ async def _run_nested_agent(
     return output.model_dump(mode="json")
 
 
+def _run_metadata_from_tool_context(tool_context: ToolContext) -> tuple[str, str]:
+    run_config = tool_context.run_config
+    if run_config is None:
+        return "", ""
+    trace_metadata = run_config.trace_metadata or {}
+    stage = trace_metadata.get("stage", "")
+    return str(run_config.group_id or ""), str(stage or "")
+
+
 def _record_direct_api_usage(response: object, *, model: str, agent_name: str, run_id: str = "", stage: str = "") -> None:
     """Record usage from a direct OpenAI API call into the telemetry system."""
     from app.telemetry import get_active_telemetry_manager, normalize_usage_record
@@ -196,6 +205,7 @@ def build_article_data_tool(
         strict_mode=True,
     )
     async def digest_article_data(
+        tool_context: ToolContext,
         story_id: str,
         url: str,
         title: str,
@@ -244,6 +254,7 @@ def build_article_data_tool(
             },
         }
         user_message = json.dumps(user_payload, separators=(",", ":"))
+        run_id, stage = _run_metadata_from_tool_context(tool_context)
 
         # Direct API call — no agent overhead
         output = await _parse_structured_response(
@@ -254,6 +265,8 @@ def build_article_data_tool(
             output_schema=ArticleDigestAgentResult,
             token_budgets=_ARTICLE_DIGEST_TOKEN_BUDGETS,
             agent_name="Article Digest (direct)",
+            run_id=run_id,
+            stage=stage,
         )
         result = output.model_dump(mode="json")
         _digest_cache[url] = result
@@ -340,6 +353,7 @@ def build_team_update_tool(agent: Agent, settings: Settings) -> tuple[FunctionTo
             ],
         }
         gate_message = json.dumps(gate_payload, separators=(",", ":"))
+        run_id, stage = _run_metadata_from_tool_context(tool_context)
 
         gate_result = await _parse_structured_response(
             _gate_client,
@@ -349,6 +363,8 @@ def build_team_update_tool(agent: Agent, settings: Settings) -> tuple[FunctionTo
             output_schema=TeamUpdateGateResult,
             token_budgets=_TEAM_UPDATE_GATE_TOKEN_BUDGETS,
             agent_name="Team Update Gate (direct)",
+            run_id=run_id,
+            stage=stage,
         )
         logger.info(
             "Team update gate decision for %s: %s",

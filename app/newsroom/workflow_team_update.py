@@ -14,7 +14,6 @@ from typing import Final
 
 from agents import Agent, Runner
 from agents.tool import FunctionTool
-from pydantic import ValidationError
 
 from app.adapters import (
     GeminiTTSBatchAdapter,
@@ -37,7 +36,6 @@ from app.newsroom.agents import (
     build_hourly_script_batch_agent,
     build_radio_script_writer_agent,
     build_team_update_agent,
-    build_team_update_batch_agent,
 )
 from app.newsroom.context import TeamUpdateRunContext
 from app.newsroom.helpers import (
@@ -56,7 +54,6 @@ from app.newsroom.tools import (
     build_article_data_tool,
     build_article_lookup_tool,
     build_radio_story_script_tool,
-    build_team_update_tool,
     process_team_update,
 )
 from app.newsroom.tracing import build_run_config
@@ -151,11 +148,6 @@ class TeamUpdateWorkflow:
         self.team_update_agent = build_team_update_agent(
             settings,
             article_data_tool=self.article_data_tool,
-        )
-        self.team_update_tool, self._report_stash = build_team_update_tool(self.team_update_agent, settings)
-        self.team_update_batch_agent = build_team_update_batch_agent(
-            settings,
-            team_update_tool=self.team_update_tool,
         )
         self.hourly_playlist_orchestrator_agent = build_hourly_playlist_orchestrator_agent(settings)
         self.script_generation_stacks = {

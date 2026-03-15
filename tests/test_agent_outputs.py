@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-from agents import Agent
+from agents import Agent, RunConfig
 from agents import Runner as SDKRunner
 from agents.tool_context import ToolContext
 
@@ -196,6 +196,82 @@ async def test_article_data_tool_direct_call_returns_digest(monkeypatch: pytest.
     assert captured["text_format"] is ArticleDigestAgentResult
     assert captured["max_output_tokens"] == 800
     assert captured["reasoning"] == {"effort": "minimal"}
+
+
+@pytest.mark.asyncio
+async def test_article_data_tool_records_run_scoped_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.schemas import ArticleContentLookupToolResponse, StoredArticleRecord
+
+    settings = build_settings()
+
+    class FakeLookup:
+        async def lookup_article(self, url: str):
+            return ArticleContentLookupToolResponse(
+                requested_url=url,
+                found=True,
+                article=StoredArticleRecord(
+                    url=url,
+                    content="Article body with enough words for telemetry attribution testing.",
+                    header="Header",
+                    description="Deck",
+                    quotes=[],
+                    group_id="group-1",
+                ),
+            )
+
+    class FakeResponse:
+        output_text = ""
+        output_parsed = ArticleDigestAgentResult(
+            summary="Direct summary",
+            key_facts=["Fact 1"],
+            confidence=0.9,
+            content_status="full",
+        )
+        output = []
+
+    async def fake_parse(**kwargs):
+        return FakeResponse()
+
+    recorded: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "app.newsroom.tools.AsyncOpenAI",
+        lambda **kw: SimpleNamespace(responses=SimpleNamespace(parse=fake_parse)),
+    )
+    monkeypatch.setattr(
+        "app.newsroom.tools._record_direct_api_usage",
+        lambda response, **kwargs: recorded.update(kwargs),
+    )
+
+    tool = build_article_data_tool(FakeLookup(), settings)
+    context = ToolContext(
+        context=build_context(),
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments="{}",
+        run_config=RunConfig(
+            workflow_name="NFL Radio Agency",
+            group_id="run-123",
+            trace_metadata={"stage": "team_update_agent"},
+        ),
+    )
+
+    result = await tool.on_invoke_tool(
+        context,
+        json.dumps(
+            {
+                "story_id": "story-1",
+                "url": "https://example.com/story-1",
+                "title": "Story 1",
+                "source_name": "ESPN",
+            }
+        ),
+    )
+
+    assert result["summary"] == "Direct summary"
+    assert recorded["agent_name"] == "Article Digest (direct)"
+    assert recorded["run_id"] == "run-123"
+    assert recorded["stage"] == "team_update_agent"
 
 
 def test_coerce_response_output_prefers_parsed_payload_when_output_text_is_blank() -> None:

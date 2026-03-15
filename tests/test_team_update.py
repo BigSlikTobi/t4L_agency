@@ -546,7 +546,7 @@ def test_team_update_workflow_uses_agent_specific_model_overrides(tmp_path: Path
     )
 
     assert workflow.team_update_agent.model == "team-update-model"
-    assert workflow.team_update_batch_agent.model == "batch-model"
+    assert not hasattr(workflow, "team_update_batch_agent")
     assert workflow.hourly_playlist_orchestrator_agent.model == "playlist-model"
     assert workflow.hourly_narrative_planner_agent.model == "narrative-planner-model"
     assert workflow.radio_script_writer_agent.model == "script-model"
@@ -825,8 +825,8 @@ def test_team_update_workflow_builds_real_agent_instances(tmp_path: Path) -> Non
     assert workflow.article_lookup_tool.name == "lookup_article_content"
     assert workflow.article_data_tool.name == "digest_article_data"
     assert workflow.team_update_agent.name == "Team Update Agent"
-    assert workflow.team_update_tool.name == "build_team_update_package"
-    assert workflow.team_update_batch_agent.name == "Team Update Batch Agent"
+    assert not hasattr(workflow, "team_update_tool")
+    assert not hasattr(workflow, "team_update_batch_agent")
     assert workflow.hourly_narrative_planner_agent.name == "Hourly Narrative Planner Agent"
     assert workflow.radio_script_writer_agent.name == "Radio Script Writer Agent"
     assert workflow.radio_story_script_tool.name == "build_radio_story_script"
@@ -1020,6 +1020,66 @@ def test_history_store_returns_latest_playlist_and_persists_story_scripts(tmp_pa
     assert scripts[0].script_run_id == "script-run-1"
     assert scripts[0].playlist_id == newer_playlist_id
     assert scripts[0].language == "en-US"
+
+
+def test_history_store_lists_story_script_batches_from_latest_run_per_batch(tmp_path: Path) -> None:
+    store = TeamUpdateHistoryStore(tmp_path / "history.sqlite3")
+    older_generated_at = datetime.now(UTC) - timedelta(hours=2)
+    batch_one_generated_at = datetime.now(UTC) - timedelta(hours=1)
+    batch_two_generated_at = datetime.now(UTC)
+
+    older_playlist_id = store.save_hourly_playlist(
+        batch_run_id="batch-1",
+        generated_at=older_generated_at,
+        lookback_minutes=60,
+        playlist=HourlyPlaylist(selected_count=0, items=[]),
+    )
+    batch_one_playlist_id = store.save_hourly_playlist(
+        batch_run_id="batch-1",
+        generated_at=batch_one_generated_at,
+        lookback_minutes=60,
+        playlist=HourlyPlaylist(selected_count=0, items=[]),
+    )
+    batch_two_playlist_id = store.save_hourly_playlist(
+        batch_run_id="batch-2",
+        generated_at=batch_two_generated_at,
+        lookback_minutes=60,
+        playlist=HourlyPlaylist(selected_count=0, items=[]),
+    )
+
+    store.save_story_scripts(
+        script_run_id="script-run-old",
+        playlist_id=older_playlist_id,
+        batch_run_id="batch-1",
+        generated_at=older_generated_at,
+        scripts=[make_radio_story_script(team="ARI")],
+    )
+    store.save_story_scripts(
+        script_run_id="script-run-new",
+        playlist_id=batch_one_playlist_id,
+        batch_run_id="batch-1",
+        generated_at=batch_one_generated_at,
+        scripts=[
+            make_radio_story_script(team="MIN", playlist_rank=1),
+            make_radio_story_script(team="BUF", playlist_rank=2),
+        ],
+    )
+    store.save_story_scripts(
+        script_run_id="script-run-batch-2",
+        playlist_id=batch_two_playlist_id,
+        batch_run_id="batch-2",
+        generated_at=batch_two_generated_at,
+        scripts=[make_radio_story_script(team="KC")],
+    )
+
+    batches = store.list_story_script_batches()
+
+    assert [entry.batch_run_id for entry in batches] == ["batch-2", "batch-1"]
+    assert batches[0].script_run_id == "script-run-batch-2"
+    assert batches[0].item_count == 1
+    assert batches[1].script_run_id == "script-run-new"
+    assert batches[1].playlist_id == batch_one_playlist_id
+    assert batches[1].item_count == 2
 
 
 def test_history_store_persists_hourly_narrative_plans(tmp_path: Path) -> None:

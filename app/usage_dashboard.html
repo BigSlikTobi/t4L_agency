@@ -536,6 +536,8 @@
         left_run_id: "",
         right_run_id: "",
       };
+      const RUN_OPTIONS_REFRESH_MS = 60000;
+      let lastRunOptionsLoadedAt = 0;
 
       function setText(id, value) {
         document.getElementById(id).textContent = value;
@@ -854,12 +856,20 @@
         window.history.replaceState({}, "", newUrl);
       }
 
-      async function loadRunOptions() {
+      async function loadRunOptions({ force = false } = {}) {
+        const shouldRefresh =
+          force ||
+          lastRunOptionsLoadedAt === 0 ||
+          Date.now() - lastRunOptionsLoadedAt >= RUN_OPTIONS_REFRESH_MS;
+        if (!shouldRefresh) {
+          return;
+        }
         const response = await fetch("/observability/usage/runs?limit=200", { cache: "no-store" });
         const payload = await response.json();
         const runs = payload.runs || [];
         populateRunSelect("left-run-id-input", queryState.left_run_id, runs);
         populateRunSelect("right-run-id-input", queryState.right_run_id, runs);
+        lastRunOptionsLoadedAt = Date.now();
       }
 
       async function loadSnapshot() {
@@ -920,6 +930,7 @@
       document.getElementById("comparison-tab-button").addEventListener("click", () => {
         setActiveTab("compare");
         updatePageUrl();
+        loadRunOptions();
       });
 
       document.getElementById("clear-filters").addEventListener("click", () => {

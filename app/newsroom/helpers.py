@@ -52,7 +52,7 @@ _ARTICLE_TRUNCATION_WORD_LIMIT: int = 600
 
 
 def truncate_article_content(content: str, *, word_limit: int = _ARTICLE_TRUNCATION_WORD_LIMIT) -> str:
-    words = content.split()
+    words = content.split(maxsplit=word_limit)
     if len(words) <= word_limit:
         return content
     return " ".join(words[:word_limit]) + " [truncated]"

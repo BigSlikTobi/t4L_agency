@@ -544,47 +544,46 @@ class TeamUpdateHistoryStore:
         with self._connect() as connection:
             batch_rows = connection.execute(
                 """
-                SELECT batch_run_id, MAX(generated_at) AS generated_at
-                FROM hourly_story_script_history
-                GROUP BY batch_run_id
+                WITH ranked_batches AS (
+                    SELECT
+                        batch_run_id,
+                        script_run_id,
+                        playlist_id,
+                        language,
+                        generated_at,
+                        COUNT(*) OVER (
+                            PARTITION BY batch_run_id, script_run_id
+                        ) AS item_count,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY batch_run_id
+                            ORDER BY generated_at DESC, playlist_rank ASC
+                        ) AS row_number
+                    FROM hourly_story_script_history
+                )
+                SELECT
+                    batch_run_id,
+                    script_run_id,
+                    playlist_id,
+                    language,
+                    generated_at,
+                    item_count
+                FROM ranked_batches
+                WHERE row_number = 1
                 ORDER BY generated_at DESC, batch_run_id DESC
                 """
             ).fetchall()
 
-            entries: list[HourlyStoryScriptBatchHistoryEntry] = []
-            for batch_row in batch_rows:
-                latest_row = connection.execute(
-                    """
-                    SELECT script_run_id, playlist_id, language, generated_at
-                    FROM hourly_story_script_history
-                    WHERE batch_run_id = ?
-                    ORDER BY generated_at DESC, playlist_rank ASC
-                    LIMIT 1
-                    """,
-                    (batch_row["batch_run_id"],),
-                ).fetchone()
-                if latest_row is None:
-                    continue
-
-                count_row = connection.execute(
-                    """
-                    SELECT COUNT(*) AS item_count
-                    FROM hourly_story_script_history
-                    WHERE batch_run_id = ? AND script_run_id = ?
-                    """,
-                    (batch_row["batch_run_id"], latest_row["script_run_id"]),
-                ).fetchone()
-
-                entries.append(
-                    HourlyStoryScriptBatchHistoryEntry(
-                        batch_run_id=str(batch_row["batch_run_id"]),
-                        script_run_id=str(latest_row["script_run_id"]),
-                        playlist_id=str(latest_row["playlist_id"]),
-                        language=str(latest_row["language"] or "en-US"),
-                        generated_at=datetime.fromisoformat(str(latest_row["generated_at"])),
-                        item_count=int(count_row["item_count"]) if count_row is not None else 0,
-                    )
+            entries = [
+                HourlyStoryScriptBatchHistoryEntry(
+                    batch_run_id=str(batch_row["batch_run_id"]),
+                    script_run_id=str(batch_row["script_run_id"]),
+                    playlist_id=str(batch_row["playlist_id"]),
+                    language=str(batch_row["language"] or "en-US"),
+                    generated_at=datetime.fromisoformat(str(batch_row["generated_at"])),
+                    item_count=int(batch_row["item_count"]),
                 )
+                for batch_row in batch_rows
+            ]
 
         return entries
 
