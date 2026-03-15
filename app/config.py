@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     openai_model_team_update_agent: str = "gpt-5-mini-2025-08-07"
     openai_model_team_update_batch_agent: str = "gpt-5-mini-2025-08-07"
     openai_model_hourly_playlist_orchestrator_agent: str = "gpt-5.2-2025-12-11"
-    openai_model_radio_script_writer_agent: str = "gpt-5.1-2025-11-13"
+    openai_model_radio_script_writer_agent: str = "gpt-5.3-chat-latest"
     openai_model_hourly_narrative_planner_agent: str = "gpt-5.4-2026-03-05"
     openai_model_hourly_script_batch_agent: str = "gpt-5-nano-2025-08-07"
     team_update_batch_chunk_size: int = 8
