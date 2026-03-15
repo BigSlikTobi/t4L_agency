@@ -13,9 +13,11 @@
         --text: #f3f5f7;
         --muted: #99a2ad;
         --accent: #69db7c;
+        --accent-alt: #74c0fc;
         --accent-soft: rgba(105, 219, 124, 0.16);
         --border: rgba(255, 255, 255, 0.08);
         --danger: #ff8787;
+        --success: #8ce99a;
       }
 
       * {
@@ -77,6 +79,35 @@
         gap: 16px;
       }
 
+      .tabs {
+        display: inline-flex;
+        gap: 8px;
+        margin-bottom: 16px;
+        padding: 6px;
+        border-radius: 16px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+      }
+
+      .tab-button {
+        padding: 10px 14px;
+        border: 0;
+        border-radius: 12px;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        font-weight: 600;
+      }
+
+      .tab-button.active {
+        background: var(--panel-alt);
+        color: var(--text);
+      }
+
+      .tab-panel[hidden] {
+        display: none !important;
+      }
+
       .filters {
         grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
         margin-bottom: 16px;
@@ -120,7 +151,8 @@
         letter-spacing: 0.08em;
       }
 
-      .field input {
+      .field input,
+      .field select {
         width: 100%;
         padding: 12px 14px;
         border-radius: 12px;
@@ -211,6 +243,58 @@
         color: var(--danger);
       }
 
+      .comparison-section {
+        margin-bottom: 16px;
+      }
+
+      .comparison-summary-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+      }
+
+      .comparison-card {
+        padding: 16px;
+        border-radius: 14px;
+        border: 1px solid var(--border);
+        background: var(--panel-alt);
+      }
+
+      .comparison-card .metric-value {
+        font-size: 26px;
+      }
+
+      .comparison-meta {
+        margin-bottom: 14px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .comparison-breakdown {
+        display: grid;
+        gap: 14px;
+      }
+
+      .comparison-breakdown h3 {
+        margin: 0 0 10px;
+        font-size: 14px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .delta-positive {
+        color: var(--accent-alt);
+      }
+
+      .delta-negative {
+        color: var(--accent);
+      }
+
+      .delta-neutral {
+        color: var(--muted);
+      }
+
       @media (max-width: 720px) {
         .page {
           padding: 16px;
@@ -244,110 +328,250 @@
         </div>
       </div>
 
-      <section class="grid filters">
-        <div class="panel filter-panel">
-          <h2>History Search</h2>
-          <form id="filter-form">
-            <div class="filter-row">
-              <div class="field">
-                <label for="from-input">From</label>
-                <input id="from-input" name="from" type="datetime-local" />
+      <div class="tabs" role="tablist" aria-label="Dashboard sections">
+        <button id="overview-tab-button" class="tab-button" type="button" role="tab" aria-controls="overview-tab-panel">
+          Overview
+        </button>
+        <button id="comparison-tab-button" class="tab-button" type="button" role="tab" aria-controls="comparison-tab-panel">
+          Compare Runs
+        </button>
+      </div>
+
+      <section id="overview-tab-panel" class="tab-panel" role="tabpanel" aria-labelledby="overview-tab-button">
+        <section class="grid filters">
+          <div class="panel filter-panel">
+            <h2>History Search</h2>
+            <form id="filter-form">
+              <div class="filter-row">
+                <div class="field">
+                  <label for="from-input">From</label>
+                  <input id="from-input" name="from" type="datetime-local" />
+                </div>
+                <div class="field">
+                  <label for="to-input">To</label>
+                  <input id="to-input" name="to" type="datetime-local" />
+                </div>
+                <div class="field">
+                  <label for="run-id-input">Run ID</label>
+                  <input id="run-id-input" name="run_id" type="text" placeholder="run-123..." />
+                </div>
+                <div class="actions">
+                  <button class="primary" type="submit">Apply</button>
+                  <button id="clear-filters" type="button">Clear</button>
+                </div>
               </div>
-              <div class="field">
-                <label for="to-input">To</label>
-                <input id="to-input" name="to" type="datetime-local" />
+            </form>
+            <div class="filter-summary" id="filter-summary">Showing all saved usage.</div>
+          </div>
+        </section>
+
+        <section class="grid cards">
+          <div class="panel">
+            <div class="metric-label">Total Tokens</div>
+            <div class="metric-value" id="total-tokens">0</div>
+          </div>
+          <div class="panel">
+            <div class="metric-label">Input Tokens</div>
+            <div class="metric-value" id="input-tokens">0</div>
+          </div>
+          <div class="panel">
+            <div class="metric-label">Output Tokens</div>
+            <div class="metric-value" id="output-tokens">0</div>
+          </div>
+          <div class="panel">
+            <div class="metric-label">Estimated Cost</div>
+            <div class="metric-value" id="cost-usd">$0.00</div>
+          </div>
+        </section>
+
+        <section class="grid cards">
+          <div class="panel">
+            <div class="metric-label">Requests</div>
+            <div class="metric-value" id="requests">0</div>
+          </div>
+          <div class="panel">
+            <div class="metric-label">Active Runs</div>
+            <div class="metric-value" id="active-runs">0</div>
+          </div>
+          <div class="panel">
+            <div class="metric-label">Cached Input</div>
+            <div class="metric-value" id="cached-input-tokens">0</div>
+          </div>
+          <div class="panel">
+            <div class="metric-label">Reasoning Tokens</div>
+            <div class="metric-value" id="reasoning-tokens">0</div>
+          </div>
+        </section>
+
+        <section class="grid two-up">
+          <div class="panel">
+            <h2>Usage By Agent</h2>
+            <div id="usage-by-agent"></div>
+          </div>
+          <div class="panel">
+            <h2>Usage By Model</h2>
+            <div id="usage-by-model"></div>
+          </div>
+        </section>
+
+        <section class="grid two-up">
+          <div class="panel">
+            <h2>Active Runs</h2>
+            <div id="active-runs-table"></div>
+          </div>
+          <div class="panel">
+            <h2>History</h2>
+            <div id="recent-events"></div>
+          </div>
+        </section>
+      </section>
+
+      <section id="comparison-tab-panel" class="tab-panel" role="tabpanel" aria-labelledby="comparison-tab-button" hidden>
+        <section class="grid filters">
+          <div class="panel filter-panel">
+            <h2>Historical Run Comparison</h2>
+            <form id="comparison-form">
+              <div class="filter-row">
+                <div class="field">
+                  <label for="left-run-id-input">Run A</label>
+                  <select id="left-run-id-input" name="left_run_id">
+                    <option value="">Select a historical run</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="right-run-id-input">Run B</label>
+                  <select id="right-run-id-input" name="right_run_id">
+                    <option value="">Select a historical run</option>
+                  </select>
+                </div>
+                <div class="actions">
+                  <button class="primary" type="submit">Compare</button>
+                  <button id="clear-comparison" type="button">Clear</button>
+                </div>
               </div>
-              <div class="field">
-                <label for="run-id-input">Run ID</label>
-                <input id="run-id-input" name="run_id" type="text" placeholder="run-123..." />
+            </form>
+            <div class="filter-summary" id="comparison-summary">
+              Enter two saved run IDs to compare their token and cost profiles side by side.
+            </div>
+          </div>
+        </section>
+
+        <section class="grid comparison-section" id="comparison-section" hidden>
+          <div class="panel">
+            <h2>Run Comparison Summary</h2>
+            <div class="comparison-summary-grid">
+              <div class="comparison-card">
+                <div class="metric-label">Requests Delta</div>
+                <div class="metric-value" id="compare-delta-requests">0</div>
+                <div class="subtle" id="compare-requests-detail">Run B 0 vs Run A 0</div>
               </div>
-              <div class="actions">
-                <button class="primary" type="submit">Apply</button>
-                <button id="clear-filters" type="button">Clear</button>
+              <div class="comparison-card">
+                <div class="metric-label">Total Tokens Delta</div>
+                <div class="metric-value" id="compare-delta-total-tokens">0</div>
+                <div class="subtle" id="compare-total-tokens-detail">Run B 0 vs Run A 0</div>
+              </div>
+              <div class="comparison-card">
+                <div class="metric-label">Output Tokens Delta</div>
+                <div class="metric-value" id="compare-delta-output-tokens">0</div>
+                <div class="subtle" id="compare-output-tokens-detail">Run B 0 vs Run A 0</div>
+              </div>
+              <div class="comparison-card">
+                <div class="metric-label">Estimated Cost Delta</div>
+                <div class="metric-value" id="compare-delta-cost">$0.00</div>
+                <div class="subtle" id="compare-cost-detail">Run B $0.00 vs Run A $0.00</div>
               </div>
             </div>
-          </form>
-          <div class="filter-summary" id="filter-summary">Showing all saved usage.</div>
-        </div>
-      </section>
+          </div>
 
-      <section class="grid cards">
-        <div class="panel">
-          <div class="metric-label">Total Tokens</div>
-          <div class="metric-value" id="total-tokens">0</div>
-        </div>
-        <div class="panel">
-          <div class="metric-label">Input Tokens</div>
-          <div class="metric-value" id="input-tokens">0</div>
-        </div>
-        <div class="panel">
-          <div class="metric-label">Output Tokens</div>
-          <div class="metric-value" id="output-tokens">0</div>
-        </div>
-        <div class="panel">
-          <div class="metric-label">Estimated Cost</div>
-          <div class="metric-value" id="cost-usd">$0.00</div>
-        </div>
-      </section>
-
-      <section class="grid cards">
-        <div class="panel">
-          <div class="metric-label">Requests</div>
-          <div class="metric-value" id="requests">0</div>
-        </div>
-        <div class="panel">
-          <div class="metric-label">Active Runs</div>
-          <div class="metric-value" id="active-runs">0</div>
-        </div>
-        <div class="panel">
-          <div class="metric-label">Cached Input</div>
-          <div class="metric-value" id="cached-input-tokens">0</div>
-        </div>
-        <div class="panel">
-          <div class="metric-label">Reasoning Tokens</div>
-          <div class="metric-value" id="reasoning-tokens">0</div>
-        </div>
-      </section>
-
-      <section class="grid two-up">
-        <div class="panel">
-          <h2>Usage By Agent</h2>
-          <div id="usage-by-agent"></div>
-        </div>
-        <div class="panel">
-          <h2>Usage By Model</h2>
-          <div id="usage-by-model"></div>
-        </div>
-      </section>
-
-      <section class="grid two-up">
-        <div class="panel">
-          <h2>Active Runs</h2>
-          <div id="active-runs-table"></div>
-        </div>
-        <div class="panel">
-          <h2>History</h2>
-          <div id="recent-events"></div>
-        </div>
+          <div class="grid two-up">
+            <div class="panel">
+              <h2 id="comparison-left-title">Run A</h2>
+              <div class="comparison-meta" id="comparison-left-meta"></div>
+              <div class="comparison-breakdown">
+                <div id="comparison-left-totals"></div>
+                <div>
+                  <h3>Usage By Agent</h3>
+                  <div id="comparison-left-agents"></div>
+                </div>
+                <div>
+                  <h3>Usage By Model</h3>
+                  <div id="comparison-left-models"></div>
+                </div>
+              </div>
+            </div>
+            <div class="panel">
+              <h2 id="comparison-right-title">Run B</h2>
+              <div class="comparison-meta" id="comparison-right-meta"></div>
+              <div class="comparison-breakdown">
+                <div id="comparison-right-totals"></div>
+                <div>
+                  <h3>Usage By Agent</h3>
+                  <div id="comparison-right-agents"></div>
+                </div>
+                <div>
+                  <h3>Usage By Model</h3>
+                  <div id="comparison-right-models"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
       </section>
     </main>
 
     <script>
       const number = new Intl.NumberFormat("en-US");
       const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
-      const timestamp = new Intl.DateTimeFormat("en-US", {
+      const dateTime = new Intl.DateTimeFormat("en-US", {
+        month: "short",
+        day: "numeric",
         hour: "2-digit",
         minute: "2-digit",
-        second: "2-digit",
       });
       const queryState = {
+        tab: "overview",
         from: "",
         to: "",
         run_id: "",
+        left_run_id: "",
+        right_run_id: "",
       };
 
       function setText(id, value) {
         document.getElementById(id).textContent = value;
+      }
+
+      function normalizeTab(value) {
+        return value === "compare" ? "compare" : "overview";
+      }
+
+      function setActiveTab(tab) {
+        queryState.tab = normalizeTab(tab);
+        const isOverview = queryState.tab === "overview";
+        document.getElementById("overview-tab-button").classList.toggle("active", isOverview);
+        document.getElementById("comparison-tab-button").classList.toggle("active", !isOverview);
+        document.getElementById("overview-tab-button").setAttribute("aria-selected", String(isOverview));
+        document.getElementById("comparison-tab-button").setAttribute("aria-selected", String(!isOverview));
+        document.getElementById("overview-tab-panel").hidden = !isOverview;
+        document.getElementById("comparison-tab-panel").hidden = isOverview;
+      }
+
+      function setSignedMetric(id, value, formatter) {
+        const element = document.getElementById(id);
+        const formatted = value > 0
+          ? `+${formatter(value)}`
+          : value < 0
+            ? `-${formatter(Math.abs(value))}`
+            : formatter(0);
+        element.textContent = formatted;
+        element.classList.remove("delta-positive", "delta-negative", "delta-neutral");
+        if (value > 0) {
+          element.classList.add("delta-positive");
+        } else if (value < 0) {
+          element.classList.add("delta-negative");
+        } else {
+          element.classList.add("delta-neutral");
+        }
       }
 
       function renderTable(targetId, columns, rows) {
@@ -366,6 +590,39 @@
           .join("");
 
         target.innerHTML = `<table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>`;
+      }
+
+      function populateRunSelect(selectId, selectedValue, runs) {
+        const select = document.getElementById(selectId);
+        const options = ['<option value="">Select a historical run</option>'];
+        for (const run of runs) {
+          const selected = run.run_id === selectedValue ? " selected" : "";
+          const label = `${run.run_id} · finished ${dateTime.format(new Date(run.finished_at))}`;
+          options.push(`<option value="${run.run_id}"${selected}>${label}</option>`);
+        }
+        if (selectedValue && !runs.some((run) => run.run_id === selectedValue)) {
+          options.push(`<option value="${selectedValue}" selected>${selectedValue} · unavailable</option>`);
+        }
+        select.innerHTML = options.join("");
+      }
+
+      function renderTotalsTable(targetId, totals) {
+        renderTable(
+          targetId,
+          [
+            { label: "Metric", render: (row) => row.label },
+            { label: "Value", render: (row) => row.value },
+          ],
+          [
+            { label: "Requests", value: number.format(totals.requests || 0) },
+            { label: "Total Tokens", value: number.format(totals.total_tokens || 0) },
+            { label: "Input Tokens", value: number.format(totals.input_tokens || 0) },
+            { label: "Output Tokens", value: number.format(totals.output_tokens || 0) },
+            { label: "Cached Input", value: number.format(totals.cached_input_tokens || 0) },
+            { label: "Reasoning Tokens", value: number.format(totals.reasoning_tokens || 0) },
+            { label: "Estimated Cost", value: money.format(totals.estimated_cost_usd || 0) },
+          ]
+        );
       }
 
       function renderSnapshot(snapshot) {
@@ -400,6 +657,9 @@
           "usage-by-model",
           [
             { label: "Model", render: (row) => `<span class="pill">${row.key}</span>` },
+            { label: "Input Tokens", render: (row) => number.format(row.input_tokens || 0) },
+            { label: "Cached Input", render: (row) => number.format(row.cached_input_tokens || 0) },
+            { label: "Output Tokens", render: (row) => number.format(row.output_tokens || 0) },
             { label: "Total Tokens", render: (row) => number.format(row.total_tokens || 0) },
             { label: "Cost", render: (row) => money.format(row.estimated_cost_usd || 0) },
           ],
@@ -411,7 +671,7 @@
           [
             { label: "Run", render: (row) => `<code>${row.run_id}</code>` },
             { label: "Stage", render: (row) => row.stage },
-            { label: "Started", render: (row) => timestamp.format(new Date(row.started_at)) },
+            { label: "Started", render: (row) => dateTime.format(new Date(row.started_at)) },
           ],
           snapshot.active_runs || []
         );
@@ -419,7 +679,7 @@
         renderTable(
           "recent-events",
           [
-            { label: "Time", render: (row) => timestamp.format(new Date(row.occurred_at)) },
+            { label: "Time", render: (row) => dateTime.format(new Date(row.occurred_at)) },
             { label: "Run", render: (row) => `<code>${row.run_id}</code>` },
             { label: "Agent", render: (row) => row.agent_name },
             { label: "Model", render: (row) => row.model },
@@ -432,10 +692,10 @@
       function renderFilterSummary(filters) {
         const parts = [];
         if (filters.from) {
-          parts.push(`from ${timestamp.format(new Date(filters.from))}`);
+          parts.push(`from ${dateTime.format(new Date(filters.from))}`);
         }
         if (filters.to) {
-          parts.push(`to ${timestamp.format(new Date(filters.to))}`);
+          parts.push(`to ${dateTime.format(new Date(filters.to))}`);
         }
         if (filters.run_id) {
           parts.push(`run ${filters.run_id}`);
@@ -443,6 +703,76 @@
         document.getElementById("filter-summary").textContent = parts.length
           ? `Filtered by ${parts.join(" · ")}`
           : "Showing all saved usage.";
+      }
+
+      function renderComparisonSummary(comparison) {
+        const leftTotals = comparison.left?.totals || {};
+        const rightTotals = comparison.right?.totals || {};
+        const delta = comparison.delta || {};
+
+        setSignedMetric("compare-delta-requests", delta.requests || 0, (value) => number.format(value));
+        setSignedMetric("compare-delta-total-tokens", delta.total_tokens || 0, (value) => number.format(value));
+        setSignedMetric("compare-delta-output-tokens", delta.output_tokens || 0, (value) => number.format(value));
+        setSignedMetric("compare-delta-cost", delta.estimated_cost_usd || 0, (value) => money.format(value));
+
+        setText(
+          "compare-requests-detail",
+          `Run B ${number.format(rightTotals.requests || 0)} vs Run A ${number.format(leftTotals.requests || 0)}`
+        );
+        setText(
+          "compare-total-tokens-detail",
+          `Run B ${number.format(rightTotals.total_tokens || 0)} vs Run A ${number.format(leftTotals.total_tokens || 0)}`
+        );
+        setText(
+          "compare-output-tokens-detail",
+          `Run B ${number.format(rightTotals.output_tokens || 0)} vs Run A ${number.format(leftTotals.output_tokens || 0)}`
+        );
+        setText(
+          "compare-cost-detail",
+          `Run B ${money.format(rightTotals.estimated_cost_usd || 0)} vs Run A ${money.format(leftTotals.estimated_cost_usd || 0)}`
+        );
+      }
+
+      function renderComparisonSnapshot(prefix, label, snapshot) {
+        const filters = snapshot.applied_filters || {};
+        const runId = filters.run_id || label;
+        document.getElementById(`comparison-${prefix}-title`).textContent = `${label}: ${runId}`;
+        document.getElementById(`comparison-${prefix}-meta`).textContent =
+          `Saved snapshot for ${runId} · refreshed ${dateTime.format(new Date(snapshot.generated_at))}`;
+
+        renderTotalsTable(`comparison-${prefix}-totals`, snapshot.totals || {});
+        renderTable(
+          `comparison-${prefix}-agents`,
+          [
+            { label: "Agent", render: (row) => `<span class="pill">${row.key}</span>` },
+            { label: "Tokens", render: (row) => number.format(row.total_tokens || 0) },
+            { label: "Cost", render: (row) => money.format(row.estimated_cost_usd || 0) },
+          ],
+          (snapshot.usage_by_agent || []).slice(0, 5)
+        );
+        renderTable(
+          `comparison-${prefix}-models`,
+          [
+            { label: "Model", render: (row) => `<span class="pill">${row.key}</span>` },
+            { label: "Tokens", render: (row) => number.format(row.total_tokens || 0) },
+            { label: "Cost", render: (row) => money.format(row.estimated_cost_usd || 0) },
+          ],
+          (snapshot.usage_by_model || []).slice(0, 5)
+        );
+      }
+
+      function renderComparison(comparison) {
+        document.getElementById("comparison-section").hidden = false;
+        renderComparisonSummary(comparison);
+        renderComparisonSnapshot("left", "Run A", comparison.left || {});
+        renderComparisonSnapshot("right", "Run B", comparison.right || {});
+        document.getElementById("comparison-summary").textContent =
+          `Comparing ${comparison.left?.applied_filters?.run_id || "Run A"} against ${comparison.right?.applied_filters?.run_id || "Run B"}.`;
+      }
+
+      function hideComparison(message) {
+        document.getElementById("comparison-section").hidden = true;
+        document.getElementById("comparison-summary").textContent = message;
       }
 
       function formatForInput(value) {
@@ -460,15 +790,21 @@
 
       function syncFormFromQuery() {
         const params = new URLSearchParams(window.location.search);
+        queryState.tab = normalizeTab(params.get("tab") || "overview");
         queryState.from = params.get("from") || "";
         queryState.to = params.get("to") || "";
         queryState.run_id = params.get("run_id") || "";
+        queryState.left_run_id = params.get("left_run_id") || "";
+        queryState.right_run_id = params.get("right_run_id") || "";
+        setActiveTab(queryState.tab);
         document.getElementById("from-input").value = formatForInput(queryState.from);
         document.getElementById("to-input").value = formatForInput(queryState.to);
         document.getElementById("run-id-input").value = queryState.run_id;
+        document.getElementById("left-run-id-input").value = queryState.left_run_id;
+        document.getElementById("right-run-id-input").value = queryState.right_run_id;
       }
 
-      function buildApiUrl() {
+      function buildSnapshotApiUrl() {
         const params = new URLSearchParams();
         if (queryState.from) {
           params.set("from", queryState.from);
@@ -483,8 +819,21 @@
         return `/observability/usage/live${query ? `?${query}` : ""}`;
       }
 
+      function buildComparisonApiUrl() {
+        if (!queryState.left_run_id || !queryState.right_run_id) {
+          return "";
+        }
+        const params = new URLSearchParams();
+        params.set("left_run_id", queryState.left_run_id);
+        params.set("right_run_id", queryState.right_run_id);
+        return `/observability/usage/compare?${params.toString()}`;
+      }
+
       function updatePageUrl() {
         const params = new URLSearchParams();
+        if (queryState.tab !== "overview") {
+          params.set("tab", queryState.tab);
+        }
         if (queryState.from) {
           params.set("from", queryState.from);
         }
@@ -494,16 +843,48 @@
         if (queryState.run_id) {
           params.set("run_id", queryState.run_id);
         }
+        if (queryState.left_run_id) {
+          params.set("left_run_id", queryState.left_run_id);
+        }
+        if (queryState.right_run_id) {
+          params.set("right_run_id", queryState.right_run_id);
+        }
         const query = params.toString();
         const newUrl = `${window.location.pathname}${query ? `?${query}` : ""}`;
         window.history.replaceState({}, "", newUrl);
       }
 
+      async function loadRunOptions() {
+        const response = await fetch("/observability/usage/runs?limit=200", { cache: "no-store" });
+        const payload = await response.json();
+        const runs = payload.runs || [];
+        populateRunSelect("left-run-id-input", queryState.left_run_id, runs);
+        populateRunSelect("right-run-id-input", queryState.right_run_id, runs);
+      }
+
       async function loadSnapshot() {
+        const response = await fetch(buildSnapshotApiUrl(), { cache: "no-store" });
+        const snapshot = await response.json();
+        renderSnapshot(snapshot);
+      }
+
+      async function loadComparison() {
+        if (!queryState.left_run_id && !queryState.right_run_id) {
+          hideComparison("Enter two saved run IDs to compare their token and cost profiles side by side.");
+          return;
+        }
+        if (!queryState.left_run_id || !queryState.right_run_id) {
+          hideComparison("Enter both Run A and Run B to load a side-by-side comparison.");
+          return;
+        }
+        const response = await fetch(buildComparisonApiUrl(), { cache: "no-store" });
+        const comparison = await response.json();
+        renderComparison(comparison);
+      }
+
+      async function loadDashboard() {
         try {
-          const response = await fetch(buildApiUrl(), { cache: "no-store" });
-          const snapshot = await response.json();
-          renderSnapshot(snapshot);
+          await Promise.all([loadSnapshot(), loadComparison(), loadRunOptions()]);
         } catch (error) {
           document.getElementById("status-text").innerHTML =
             '<span class="warning">Dashboard refresh failed</span>';
@@ -519,7 +900,26 @@
         queryState.to = toValue ? new Date(toValue).toISOString() : "";
         queryState.run_id = runIdValue;
         updatePageUrl();
-        loadSnapshot();
+        loadDashboard();
+      });
+
+      document.getElementById("comparison-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        queryState.left_run_id = document.getElementById("left-run-id-input").value.trim();
+        queryState.right_run_id = document.getElementById("right-run-id-input").value.trim();
+        setActiveTab("compare");
+        updatePageUrl();
+        loadDashboard();
+      });
+
+      document.getElementById("overview-tab-button").addEventListener("click", () => {
+        setActiveTab("overview");
+        updatePageUrl();
+      });
+
+      document.getElementById("comparison-tab-button").addEventListener("click", () => {
+        setActiveTab("compare");
+        updatePageUrl();
       });
 
       document.getElementById("clear-filters").addEventListener("click", () => {
@@ -530,12 +930,21 @@
         document.getElementById("to-input").value = "";
         document.getElementById("run-id-input").value = "";
         updatePageUrl();
-        loadSnapshot();
+        loadDashboard();
+      });
+
+      document.getElementById("clear-comparison").addEventListener("click", () => {
+        queryState.left_run_id = "";
+        queryState.right_run_id = "";
+        document.getElementById("left-run-id-input").value = "";
+        document.getElementById("right-run-id-input").value = "";
+        updatePageUrl();
+        loadDashboard();
       });
 
       syncFormFromQuery();
-      loadSnapshot();
-      setInterval(loadSnapshot, 3000);
+      loadDashboard();
+      setInterval(loadDashboard, 3000);
     </script>
   </body>
 </html>

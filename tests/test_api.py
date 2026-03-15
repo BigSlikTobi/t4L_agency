@@ -28,6 +28,8 @@ from app.schemas import (
 class FakeTelemetry:
     enabled = True
     last_filters = None
+    last_comparison = None
+    last_runs_limit = None
 
     def dashboard_snapshot(self, *, from_time=None, to_time=None, run_id=None):
         self.last_filters = {
@@ -105,6 +107,50 @@ class FakeTelemetry:
                 "to": to_time.isoformat() if to_time is not None else None,
                 "run_id": run_id,
             },
+        }
+
+    def dashboard_comparison(self, *, left_run_id, right_run_id):
+        self.last_comparison = {
+            "left_run_id": left_run_id,
+            "right_run_id": right_run_id,
+        }
+        return {
+            "status": "ok",
+            "telemetry_enabled": True,
+            "export_configured": False,
+            "generated_at": datetime.now(UTC),
+            "left": self.dashboard_snapshot(run_id=left_run_id),
+            "right": self.dashboard_snapshot(run_id=right_run_id),
+            "delta": {
+                "requests": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cached_input_tokens": 0,
+                "reasoning_tokens": 0,
+                "total_tokens": 0,
+                "estimated_cost_usd": 0.0,
+            },
+        }
+
+    def dashboard_historical_runs(self, *, limit=200):
+        self.last_runs_limit = limit
+        return {
+            "status": "ok",
+            "telemetry_enabled": True,
+            "export_configured": False,
+            "generated_at": datetime.now(UTC),
+            "runs": [
+                {
+                    "run_id": "run-b",
+                    "workflow": "NFL Radio Agency",
+                    "finished_at": datetime(2026, 3, 14, 12, 0, tzinfo=UTC),
+                },
+                {
+                    "run_id": "run-a",
+                    "workflow": "NFL Radio Agency",
+                    "finished_at": datetime(2026, 3, 14, 11, 30, tzinfo=UTC),
+                },
+            ],
         }
 
 
@@ -513,6 +559,39 @@ def test_usage_dashboard_live_forwards_filters() -> None:
     assert fake_telemetry.last_filters["to_time"].isoformat() == "2026-03-14T12:00:00+00:00"
     payload = response.json()
     assert payload["applied_filters"]["run_id"] == "run-123"
+
+
+def test_usage_dashboard_compare_returns_side_by_side_runs() -> None:
+    app = create_app(settings=build_settings(), orchestrator=FakeOrchestrator())
+    fake_telemetry = FakeTelemetry()
+
+    with TestClient(app) as client:
+        app.state.telemetry = fake_telemetry
+        response = client.get(
+            "/observability/usage/compare",
+            params={"left_run_id": "run-a", "right_run_id": "run-b"},
+        )
+
+    assert response.status_code == 200
+    assert fake_telemetry.last_comparison == {"left_run_id": "run-a", "right_run_id": "run-b"}
+    payload = response.json()
+    assert payload["left"]["applied_filters"]["run_id"] == "run-a"
+    assert payload["right"]["applied_filters"]["run_id"] == "run-b"
+
+
+def test_usage_dashboard_runs_returns_historical_run_options() -> None:
+    app = create_app(settings=build_settings(), orchestrator=FakeOrchestrator())
+    fake_telemetry = FakeTelemetry()
+
+    with TestClient(app) as client:
+        app.state.telemetry = fake_telemetry
+        response = client.get("/observability/usage/runs", params={"limit": 50})
+
+    assert response.status_code == 200
+    assert fake_telemetry.last_runs_limit == 50
+    payload = response.json()
+    assert payload["runs"][0]["run_id"] == "run-b"
+    assert payload["runs"][0]["finished_at"] == "2026-03-14T12:00:00Z"
 
 
 def test_qa_player_feed_prefers_latest_scripts_artifact(tmp_path: Path) -> None:

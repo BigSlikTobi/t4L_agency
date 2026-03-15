@@ -237,6 +237,40 @@ class UsageTelemetrySnapshot(BaseModel):
     applied_filters: dict[str, str | None] = Field(default_factory=dict)
 
 
+class UsageTelemetryComparisonDelta(BaseModel):
+    requests: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0
+    reasoning_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+
+
+class UsageTelemetryComparison(BaseModel):
+    status: Literal["ok"]
+    telemetry_enabled: bool
+    export_configured: bool
+    generated_at: datetime
+    left: UsageTelemetrySnapshot
+    right: UsageTelemetrySnapshot
+    delta: UsageTelemetryComparisonDelta = Field(default_factory=UsageTelemetryComparisonDelta)
+
+
+class UsageTelemetryRunSummary(BaseModel):
+    run_id: str
+    workflow: str
+    finished_at: datetime
+
+
+class UsageTelemetryRunSummaryResponse(BaseModel):
+    status: Literal["ok"]
+    telemetry_enabled: bool
+    export_configured: bool
+    generated_at: datetime
+    runs: list[UsageTelemetryRunSummary] = Field(default_factory=list)
+
+
 class StoredArticleRecord(BaseModel):
     url: str
     cite_url: str | None = None
