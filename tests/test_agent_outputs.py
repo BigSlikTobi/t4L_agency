@@ -358,6 +358,9 @@ def test_writer_prompt_requires_traceable_facts_and_explicit_names() -> None:
     assert "use only a brief callback and then pivot quickly into the fresh angle" in prompt
     assert "Do not replay the prior segment's lead sentence pattern" in prompt
     assert "Use primary_angle and fresh_material_to_emphasize as the center of gravity" in prompt
+    assert 'Use micro-imperfections sparingly. An occasional "look," "right," "I mean," or "you know"' in prompt
+    assert "place one longer sentence followed by a short punchy sentence" in prompt
+    assert "Give each line a clear emotional intent such as confident, amused, or skeptical" in prompt
     assert "director_notes should be a compact high-level performance note" in prompt
     assert "pace should contain only the pacing guidance" in prompt
     assert "must_hit should list the exact names, phrases, or facts" in prompt
@@ -380,6 +383,9 @@ def test_german_script_prompts_are_present_and_localized() -> None:
     assert "Write the following fields in natural German for a German radio audience" in writer_prompt
     assert "Keep proper names, team names, explicit quotes, and source-grounded NFL terminology accurate" in writer_prompt
     assert "use only a brief callback and then pivot quickly into the fresh angle" in writer_prompt
+    assert 'Use micro-imperfections sparingly in natural German. An occasional "schau", "ganz ehrlich", "weisst du", or "oder?"' in writer_prompt
+    assert "place one longer sentence followed by a short punchy sentence" in writer_prompt
+    assert "Give each line a clear emotional intent such as selbstbewusst, leicht amuesiert, or skeptisch" in writer_prompt
     assert "Preserve the supplied anti-repetition direction" in batch_prompt
     assert "All returned direction fields and script copy must be in natural German" in batch_prompt
 

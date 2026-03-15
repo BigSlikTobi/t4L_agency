@@ -22,7 +22,7 @@ There are currently 8 active SDK agent types, 1 inactive builder definition, and
 | Team Update Agent | [`build_team_update_agent`](app/newsroom/agents.py) | `openai_model_team_update_agent` -> `gpt-5-mini-2025-08-07` | `digest_article_data` | [`team_update_agent`](app/newsroom/prompts.yml) |
 | Hourly Playlist Orchestrator Agent | [`build_hourly_playlist_orchestrator_agent`](app/newsroom/agents.py) | `openai_model_hourly_playlist_orchestrator_agent` -> `gpt-5.2-2025-12-11` | none | [`hourly_playlist_orchestrator_agent`](app/newsroom/prompts.yml) |
 | Hourly Narrative Planner Agent | [`build_hourly_narrative_planner_agent`](app/newsroom/agents.py) | `openai_model_hourly_narrative_planner_agent` -> `gpt-5.4-2026-03-05` | none | [`hourly_narrative_planner_agent`](app/newsroom/prompts.yml) |
-| Radio Script Writer Agent | [`build_radio_script_writer_agent`](app/newsroom/agents.py) | `openai_model_radio_script_writer_agent` -> `gpt-5.1-2025-11-13` | `digest_article_data` | [`radio_script_writer_agent`](app/newsroom/prompts.yml) |
+| Radio Script Writer Agent | [`build_radio_script_writer_agent`](app/newsroom/agents.py) | `openai_model_radio_script_writer_agent` -> `gpt-5.3-chat-latest` | `digest_article_data` | [`radio_script_writer_agent`](app/newsroom/prompts.yml) |
 | Hourly Script Batch Agent | [`build_hourly_script_batch_agent`](app/newsroom/agents.py) | `openai_model_hourly_script_batch_agent` -> `gpt-5-mini-2025-08-07` | `build_radio_story_script` | [`hourly_script_batch_agent`](app/newsroom/prompts.yml) |
 
 ### Inactive builder definition
@@ -40,7 +40,7 @@ These are real runtime `Agent(...)` instances created in [`app/newsroom/workflow
 | Runtime agent instance | Based on | Default model | Tool(s) | Prompt |
 | --- | --- | --- | --- | --- |
 | `Hourly Narrative Planner Agent (de-DE)` | `Hourly Narrative Planner Agent` | `openai_model_hourly_narrative_planner_agent` -> `gpt-5.4-2026-03-05` | none | [`hourly_narrative_planner_agent`](app/newsroom/prompts.yml) |
-| `Radio Script Writer Agent (de-DE)` | `Radio Script Writer Agent` | `openai_model_radio_script_writer_agent` -> `gpt-5.1-2025-11-13` | `digest_article_data` | [`radio_script_writer_agent_de_de`](app/newsroom/prompts.yml) |
+| `Radio Script Writer Agent (de-DE)` | `Radio Script Writer Agent` | `openai_model_radio_script_writer_agent` -> `gpt-5.3-chat-latest` | `digest_article_data` | [`radio_script_writer_agent_de_de`](app/newsroom/prompts.yml) |
 | `Hourly Script Batch Agent (de-DE)` | `Hourly Script Batch Agent` | `openai_model_hourly_script_batch_agent` -> `gpt-5-mini-2025-08-07` | `build_radio_story_script` | [`hourly_script_batch_agent_de_de`](app/newsroom/prompts.yml) |
 
 ### Names that are not separate agents
@@ -341,7 +341,7 @@ Guardrails:
 - Builder: [`build_radio_script_writer_agent`](app/newsroom/agents.py)
 - Model: `settings.agent_model("radio_script_writer_agent")`
 - Default config key: `openai_model_radio_script_writer_agent`
-- Default value: `gpt-5.1-2025-11-13`
+- Default value: `gpt-5.3-chat-latest`
 - Tool: `digest_article_data`
 - Prompt: [`radio_script_writer_agent`](app/newsroom/prompts.yml), [`radio_script_writer_agent_de_de`](app/newsroom/prompts.yml)
 - Output schema: `RadioStoryScriptDraft`
@@ -352,6 +352,7 @@ What it does:
 - Receives one selected story, one persona, hour context, and source references.
 - Calls `digest_article_data` exactly once per source article.
 - Produces radio-ready intro, body, outro, performance notes, and structured metadata.
+- Uses sparse spoken micro-imperfections, longer-then-shorter sentence pacing shifts, and line-level emotional intent to keep delivery human without changing the schema.
 
 Handoff:
 
