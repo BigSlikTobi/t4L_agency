@@ -858,15 +858,28 @@ class QAPlayerFeedItem(BaseModel):
     script_text: str = ""
 
 
+class QAPlayerBatchOption(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    batch_id: str
+    generated_at: datetime
+    script_run_id: str = ""
+    playlist_id: str = ""
+    language: ScriptLanguage = DEFAULT_SCRIPT_LANGUAGE
+    item_count: int = Field(default=0, ge=0)
+
+
 class QAPlayerFeed(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source: Literal["artifact", "history", "empty"]
     generated_at: datetime | None = None
+    selected_batch: str = ""
     script_run_id: str = ""
     playlist_id: str = ""
     language: ScriptLanguage = DEFAULT_SCRIPT_LANGUAGE
     has_audio: bool = False
+    available_batches: list[QAPlayerBatchOption] = Field(default_factory=list)
     items: list[QAPlayerFeedItem] = Field(default_factory=list)
 
 
@@ -1067,6 +1080,15 @@ class HourlyStoryScriptHistoryEntry(BaseModel):
     generated_at: datetime
     duration_seconds: int = Field(ge=1, le=240)
     script_json: dict
+
+
+class HourlyStoryScriptBatchHistoryEntry(BaseModel):
+    batch_run_id: str
+    script_run_id: str
+    playlist_id: str
+    language: ScriptLanguage = DEFAULT_SCRIPT_LANGUAGE
+    generated_at: datetime
+    item_count: int = Field(ge=0)
 
 
 class HourlyNarrativePlanHistoryEntry(BaseModel):

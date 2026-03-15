@@ -453,6 +453,7 @@ def test_qa_player_page_loads() -> None:
 
     assert response.status_code == 200
     assert "QA Radio Player" in response.text
+    assert 'id="batch-select"' in response.text
     assert "/qa/player-feed" in response.text
 
 
@@ -567,6 +568,8 @@ def test_qa_player_feed_prefers_latest_scripts_artifact(tmp_path: Path) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["source"] == "artifact"
+    assert payload["selected_batch"] == ""
+    assert payload["available_batches"] == []
     assert payload["has_audio"] is True
     assert payload["items"][0]["audio_url"] == "https://example.com/vikings-update.mp3"
     assert payload["items"][0]["script_text"] == "Intro Body Outro"
@@ -717,8 +720,52 @@ def test_qa_player_feed_falls_back_to_latest_history_scripts(tmp_path: Path) -> 
     assert response.status_code == 200
     payload = response.json()
     assert payload["source"] == "history"
+    assert payload["selected_batch"] == "batch-1"
     assert payload["script_run_id"] == "script-run-1"
     assert payload["playlist_id"] == "playlist-1"
     assert payload["has_audio"] is False
+    assert payload["available_batches"][0]["batch_id"] == "batch-1"
     assert [item["team"] for item in payload["items"]] == ["MIN", "DET"]
     assert payload["items"][0]["script_text"] == "Intro Body Outro"
+
+
+def test_qa_player_feed_lists_batches_newest_first_and_loads_requested_batch(tmp_path: Path) -> None:
+    settings = build_settings(team_update_history_sqlite_path=tmp_path / "team_update_history.sqlite3")
+    store = TeamUpdateHistoryStore(settings.team_update_history_sqlite_path)
+    store.save_story_scripts(
+        script_run_id="script-run-older",
+        playlist_id="playlist-older",
+        batch_run_id="batch-older",
+        generated_at=datetime(2026, 3, 12, 9, 0, tzinfo=UTC),
+        scripts=[
+            make_radio_story_script(team="MIN", playlist_rank=1),
+            make_radio_story_script(team="DET", playlist_rank=2),
+        ],
+    )
+    store.save_story_scripts(
+        script_run_id="script-run-newer",
+        playlist_id="playlist-newer",
+        batch_run_id="batch-newer",
+        generated_at=datetime(2026, 3, 13, 10, 30, tzinfo=UTC),
+        scripts=[
+            make_radio_story_script(team="BUF", playlist_rank=1),
+        ],
+    )
+    app = create_app(settings=settings, orchestrator=FakeOrchestrator())
+    client = TestClient(app)
+
+    response = client.get("/qa/player-feed", params={"batch": "batch-older"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source"] == "history"
+    assert payload["selected_batch"] == "batch-older"
+    assert [batch["batch_id"] for batch in payload["available_batches"]] == [
+        "batch-newer",
+        "batch-older",
+    ]
+    assert payload["available_batches"][0]["item_count"] == 1
+    assert payload["available_batches"][1]["item_count"] == 2
+    assert payload["script_run_id"] == "script-run-older"
+    assert payload["playlist_id"] == "playlist-older"
+    assert [item["team"] for item in payload["items"]] == ["MIN", "DET"]

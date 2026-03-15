@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 from app.schemas import (
     HourlyNarrativePlan,
+    HourlyStoryScriptBatchHistoryEntry,
     HourlyNarrativePlanHistoryEntry,
     HourlyPlaylist,
     HourlyPlaylistHistoryEntry,
@@ -517,6 +518,75 @@ class TeamUpdateHistoryStore:
         if row is None:
             return []
         return self.list_story_scripts(script_run_id=str(row["script_run_id"]))
+
+    def get_story_scripts_for_batch(
+        self,
+        *,
+        batch_run_id: str,
+    ) -> list[HourlyStoryScriptHistoryEntry]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT script_run_id
+                FROM hourly_story_script_history
+                WHERE batch_run_id = ?
+                ORDER BY generated_at DESC
+                LIMIT 1
+                """,
+                (batch_run_id,),
+            ).fetchone()
+
+        if row is None:
+            return []
+        return self.list_story_scripts(script_run_id=str(row["script_run_id"]))
+
+    def list_story_script_batches(self) -> list[HourlyStoryScriptBatchHistoryEntry]:
+        with self._connect() as connection:
+            batch_rows = connection.execute(
+                """
+                SELECT batch_run_id, MAX(generated_at) AS generated_at
+                FROM hourly_story_script_history
+                GROUP BY batch_run_id
+                ORDER BY generated_at DESC, batch_run_id DESC
+                """
+            ).fetchall()
+
+            entries: list[HourlyStoryScriptBatchHistoryEntry] = []
+            for batch_row in batch_rows:
+                latest_row = connection.execute(
+                    """
+                    SELECT script_run_id, playlist_id, language, generated_at
+                    FROM hourly_story_script_history
+                    WHERE batch_run_id = ?
+                    ORDER BY generated_at DESC, playlist_rank ASC
+                    LIMIT 1
+                    """,
+                    (batch_row["batch_run_id"],),
+                ).fetchone()
+                if latest_row is None:
+                    continue
+
+                count_row = connection.execute(
+                    """
+                    SELECT COUNT(*) AS item_count
+                    FROM hourly_story_script_history
+                    WHERE batch_run_id = ? AND script_run_id = ?
+                    """,
+                    (batch_row["batch_run_id"], latest_row["script_run_id"]),
+                ).fetchone()
+
+                entries.append(
+                    HourlyStoryScriptBatchHistoryEntry(
+                        batch_run_id=str(batch_row["batch_run_id"]),
+                        script_run_id=str(latest_row["script_run_id"]),
+                        playlist_id=str(latest_row["playlist_id"]),
+                        language=str(latest_row["language"] or "en-US"),
+                        generated_at=datetime.fromisoformat(str(latest_row["generated_at"])),
+                        item_count=int(count_row["item_count"]) if count_row is not None else 0,
+                    )
+                )
+
+        return entries
 
     @staticmethod
     def _ensure_column(

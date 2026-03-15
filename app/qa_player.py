@@ -11,6 +11,7 @@ from app.config import Settings
 from app.history import TeamUpdateHistoryStore
 from app.schemas import (
     HourlyPlaylistScriptsResponse,
+    QAPlayerBatchOption,
     QAPlayerFeed,
     QAPlayerFeedItem,
     RadioStoryScript,
@@ -27,21 +28,41 @@ def load_qa_player_html() -> str:
 
 
 def build_qa_player_feed(settings: Settings, batch: str | None = None) -> QAPlayerFeed:
-    if batch:
+    store = TeamUpdateHistoryStore(settings.team_update_history_sqlite_path)
+    available_batches = _load_available_batches(store)
+    selected_batch = _resolve_selected_history_batch(batch, available_batches)
+
+    if selected_batch:
+        return _with_batch_metadata(
+            _load_history_feed(store, batch_run_id=selected_batch),
+            selected_batch=selected_batch,
+            available_batches=available_batches,
+        )
+
+    if batch and not selected_batch:
         batch_feed = _load_batch_manifest_feed(settings, batch)
         if batch_feed is not None:
-            return batch_feed
+            return _with_batch_metadata(batch_feed, available_batches=available_batches)
 
     scripts_artifact_path = settings.team_update_history_sqlite_path.parent / "scripts.json"
     artifact_feed = _load_artifact_feed(scripts_artifact_path)
     if artifact_feed is not None:
-        if batch:
-            return _apply_batch_override(artifact_feed, settings, batch)
-        return artifact_feed
-    history_feed = _load_history_feed(settings)
-    if batch:
-        return _apply_batch_override(history_feed, settings, batch)
-    return history_feed
+        if batch and not selected_batch:
+            return _with_batch_metadata(
+                _apply_batch_override(artifact_feed, settings, batch),
+                available_batches=available_batches,
+            )
+        return _with_batch_metadata(artifact_feed, available_batches=available_batches)
+
+    history_feed = _load_history_feed(store)
+    if batch and not selected_batch:
+        history_feed = _apply_batch_override(history_feed, settings, batch)
+        return _with_batch_metadata(history_feed, available_batches=available_batches)
+    return _with_batch_metadata(
+        history_feed,
+        selected_batch=selected_batch or history_feed.selected_batch,
+        available_batches=available_batches,
+    )
 
 
 def _load_artifact_feed(path: Path) -> QAPlayerFeed | None:
@@ -81,9 +102,16 @@ def _load_artifact_feed(path: Path) -> QAPlayerFeed | None:
     )
 
 
-def _load_history_feed(settings: Settings) -> QAPlayerFeed:
-    store = TeamUpdateHistoryStore(settings.team_update_history_sqlite_path)
-    entries = store.get_latest_story_scripts()
+def _load_history_feed(
+    store: TeamUpdateHistoryStore,
+    *,
+    batch_run_id: str | None = None,
+) -> QAPlayerFeed:
+    entries = (
+        store.get_story_scripts_for_batch(batch_run_id=batch_run_id)
+        if batch_run_id
+        else store.get_latest_story_scripts()
+    )
     if not entries:
         return QAPlayerFeed(source="empty")
 
@@ -110,6 +138,7 @@ def _load_history_feed(settings: Settings) -> QAPlayerFeed:
     return QAPlayerFeed(
         source="history",
         generated_at=latest.generated_at,
+        selected_batch=latest.batch_run_id,
         script_run_id=latest.script_run_id,
         playlist_id=latest.playlist_id,
         language=items[0].language,
@@ -232,3 +261,45 @@ def _title_from_item_id(item_id: str) -> str:
     if not words:
         return item_id
     return " ".join(word.upper() if len(word) <= 3 else word.capitalize() for word in words)
+
+
+def _load_available_batches(store: TeamUpdateHistoryStore) -> list[QAPlayerBatchOption]:
+    return [
+        QAPlayerBatchOption(
+            batch_id=entry.batch_run_id,
+            generated_at=entry.generated_at,
+            script_run_id=entry.script_run_id,
+            playlist_id=entry.playlist_id,
+            language=entry.language,
+            item_count=entry.item_count,
+        )
+        for entry in store.list_story_script_batches()
+    ]
+
+
+def _resolve_selected_history_batch(
+    batch: str | None,
+    available_batches: list[QAPlayerBatchOption],
+) -> str:
+    normalized_batch = str(batch or "").strip()
+    if not normalized_batch:
+        return ""
+
+    available_batch_ids = {entry.batch_id for entry in available_batches}
+    if normalized_batch in available_batch_ids:
+        return normalized_batch
+    return ""
+
+
+def _with_batch_metadata(
+    feed: QAPlayerFeed,
+    *,
+    selected_batch: str = "",
+    available_batches: list[QAPlayerBatchOption] | None = None,
+) -> QAPlayerFeed:
+    return feed.model_copy(
+        update={
+            "selected_batch": selected_batch or feed.selected_batch,
+            "available_batches": available_batches or [],
+        }
+    )
