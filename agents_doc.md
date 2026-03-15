@@ -10,9 +10,9 @@ This document describes the current agent system in the repository, including:
 
 ## Quick Inventory
 
-There are currently 9 base SDK agent types and 3 localized runtime variants.
+There are currently 8 active SDK agent types, 1 inactive builder definition, and 3 localized runtime variants.
 
-### Base agent types
+### Active SDK agent types
 
 | Agent | Builder | Default model | Tool(s) | Prompt |
 | --- | --- | --- | --- | --- |
@@ -20,11 +20,18 @@ There are currently 9 base SDK agent types and 3 localized runtime variants.
 | Team News Agent | [`build_team_news_agent`](app/newsroom/agents.py) | `openai_model_team_news_agent` -> `gpt-5-2025-08-07` | `digest_article_data` | [`team_news_agent`](app/newsroom/prompts.yml) |
 | Rundown Orchestrator Agent | [`build_rundown_orchestrator_agent`](app/newsroom/agents.py) | `openai_model_rundown_orchestrator_agent` -> `gpt-5.2-2025-12-11` | `analyze_team_news` | [`rundown_orchestrator_agent`](app/newsroom/prompts.yml) |
 | Team Update Agent | [`build_team_update_agent`](app/newsroom/agents.py) | `openai_model_team_update_agent` -> `gpt-5-mini-2025-08-07` | `digest_article_data` | [`team_update_agent`](app/newsroom/prompts.yml) |
-| Team Update Batch Agent | [`build_team_update_batch_agent`](app/newsroom/agents.py) | `openai_model_team_update_batch_agent` -> `gpt-5-mini-2025-08-07` | `build_team_update_package` | [`team_update_batch_agent`](app/newsroom/prompts.yml) |
 | Hourly Playlist Orchestrator Agent | [`build_hourly_playlist_orchestrator_agent`](app/newsroom/agents.py) | `openai_model_hourly_playlist_orchestrator_agent` -> `gpt-5.2-2025-12-11` | none | [`hourly_playlist_orchestrator_agent`](app/newsroom/prompts.yml) |
 | Hourly Narrative Planner Agent | [`build_hourly_narrative_planner_agent`](app/newsroom/agents.py) | `openai_model_hourly_narrative_planner_agent` -> `gpt-5.4-2026-03-05` | none | [`hourly_narrative_planner_agent`](app/newsroom/prompts.yml) |
 | Radio Script Writer Agent | [`build_radio_script_writer_agent`](app/newsroom/agents.py) | `openai_model_radio_script_writer_agent` -> `gpt-5.1-2025-11-13` | `digest_article_data` | [`radio_script_writer_agent`](app/newsroom/prompts.yml) |
 | Hourly Script Batch Agent | [`build_hourly_script_batch_agent`](app/newsroom/agents.py) | `openai_model_hourly_script_batch_agent` -> `gpt-5-mini-2025-08-07` | `build_radio_story_script` | [`hourly_script_batch_agent`](app/newsroom/prompts.yml) |
+
+### Inactive builder definition
+
+| Agent | Builder | Default model | Tool(s) | Prompt |
+| --- | --- | --- | --- | --- |
+| Team Update Batch Agent | [`build_team_update_batch_agent`](app/newsroom/agents.py) | `openai_model_team_update_batch_agent` -> `gpt-5-mini-2025-08-07` | `build_team_update_package` | [`team_update_batch_agent`](app/newsroom/prompts.yml) |
+
+This builder remains in the codebase, but [`app/newsroom/workflow_team_update.py`](app/newsroom/workflow_team_update.py) currently dispatches batch runs deterministically via `process_team_update(...)` instead of instantiating this agent.
 
 ### Localized runtime variants
 
@@ -65,9 +72,9 @@ flowchart TD
     subgraph TeamUpdate["Team update flow"]
         Filter --> TU["Team Update Agent"]
         TU -->|tool: digest_article_data| AD
-        Filter --> TUB["Team Update Batch Agent"]
-        TUB -->|tool: build_team_update_package| TU
-        TUB --> HPO["Hourly Playlist Orchestrator Agent"]
+        Filter --> TUD["Deterministic batch dispatch"]
+        TUD --> TU
+        TUD --> HPO["Hourly Playlist Orchestrator Agent"]
         HPO --> Playlist["Saved hourly playlist"]
     end
 
@@ -93,7 +100,7 @@ flowchart LR
     B1 --> C1["Article Data Agent"]
     C1 --> D1["lookup_article_content"]
 
-    A2["Team Update Batch Agent"] --> B2["Team Update Agent"]
+    A2["Deterministic batch dispatch"] --> B2["Team Update Agent"]
     B2 --> C2["Article Data Agent"]
     C2 --> D2["lookup_article_content"]
 
@@ -212,28 +219,31 @@ Guardrails:
 - Default value: `gpt-5-mini-2025-08-07`
 - Tool: `digest_article_data`
 - Prompt: [`team_update_agent`](app/newsroom/prompts.yml)
-- Output schema: `TeamUpdatePackage`
+- Output schema: `TeamUpdateAgentResult`
 - Primary role: build one 180-second team update production brief from pre-gated candidate stories
 
 What it does:
 
 - Receives one team and its deterministic candidate list.
 - Calls `digest_article_data` exactly once per candidate story.
-- Produces a single package with exactly one topic and unified narrative.
+- Returns `report_ready` with a single package when at least one concrete, team-specific, verifiable update survives digestion.
+- Returns `no_update` when the candidates do not support a real on-air update.
 
 Handoff:
 
 - Called directly in single-team update runs
-- Called indirectly by `Team Update Batch Agent`
+- Called directly by deterministic batch dispatch in [`app/newsroom/workflow_team_update.py`](app/newsroom/workflow_team_update.py)
 
 Guardrails:
 
 - Candidate list is pre-gated before the agent runs
+- Deterministically unusable stored article bodies are dropped before the agent sees them
 - Output is a production brief, not final script copy
 - Must explain what changed when framing is `update`
 - Must include source articles that support the central narrative
+- Must never produce a meta-package whose real message is missing verification or empty digests
 
-### 5. Team Update Batch Agent
+### 5. Team Update Batch Agent Builder
 
 - Runtime name: `Team Update Batch Agent`
 - Builder: [`build_team_update_batch_agent`](app/newsroom/agents.py)
@@ -242,27 +252,27 @@ Guardrails:
 - Default value: `gpt-5-mini-2025-08-07`
 - Tool: `build_team_update_package`
 - Prompt: [`team_update_batch_agent`](app/newsroom/prompts.yml)
-- Output schema: `TeamUpdateBatchAgentResult`
-- Primary role: orchestrate batch team update generation across many teams
+- Output schema: `TeamUpdateBatchAgentTransportResult`
+- Primary role: available nested batch orchestrator definition; not currently instantiated by the live workflow
 
 What it does:
 
-- Receives prepared per-team objects in batch order.
-- Calls `build_team_update_package` exactly once for each team with candidates.
-- Returns one report entry per input team and preserves order.
+- Defines the schema-first nested batch path that was previously used for per-team orchestration.
+- Preserves order and transport output shape when instantiated.
+- Remains available for future runtime variants or experiments.
+- The current production workflow does not instantiate this agent.
 
 Handoff:
 
-- Sits between deterministic batch preparation and playlist creation
-- Delegates team package generation to `Team Update Agent`
-- Feeds `Hourly Playlist Orchestrator Agent` with eligible `report_ready` outputs
+- If instantiated, it sits between deterministic batch preparation and playlist creation.
+- The current production workflow bypasses it and calls `process_team_update(...)` directly for each prepared team.
 
 Guardrails:
 
-- Teams with zero candidates must return `no_update`
-- Output order must match input order
-- Chunking is deterministic via `team_update_batch_chunk_size`
-- Batch reports are validated before persistence and playlist creation
+- If instantiated, teams with zero candidates must return `no_update`.
+- If instantiated, teams with candidates may still return `no_update` after digestion removes airworthy material.
+- If instantiated, output order must match input order and nested `report` payloads must be copied exactly from `build_team_update_package`.
+- The active workflow instead validates deterministic `TeamUpdateBatchAgentReport` outputs before persistence and playlist creation.
 
 ### 6. Hourly Playlist Orchestrator Agent
 
@@ -284,11 +294,12 @@ What it does:
 
 Handoff:
 
-- Consumes `Team Update Batch Agent` outputs
+- Consumes deterministic batch-dispatch outputs from [`app/newsroom/workflow_team_update.py`](app/newsroom/workflow_team_update.py)
 - Produces the saved playlist used by script generation
 
 Guardrails:
 
+- Eligible reports are real reportable updates only; skipped teams never reach this stage
 - If fewer than 10 eligible reports exist, include all of them
 - If 10 or more exist, return 10 to 15 items
 - Rank starts at 1 with no gaps
@@ -394,7 +405,6 @@ This section answers one narrow question clearly: when one agent depends on anot
 | --- | --- | --- | --- |
 | `Rundown Orchestrator Agent` | `analyze_team_news` | `Team News Agent` | Score one team's candidate stories before the final show rundown is assembled |
 | `Team News Agent` | `digest_article_data` | `Article Data Agent` | Turn each source article into a structured digest before assigning team-level relevance |
-| `Team Update Batch Agent` | `build_team_update_package` | `Team Update Agent` | Produce one team update package per team inside a batch run |
 | `Team Update Agent` | `digest_article_data` | `Article Data Agent` | Ground each candidate update story in article-level facts before writing the package |
 | `Hourly Script Batch Agent` | `build_radio_story_script` | `Radio Script Writer Agent` | Write one radio segment per selected playlist story |
 | `Radio Script Writer Agent` | `digest_article_data` | `Article Data Agent` | Re-digest each source article so final script copy stays source-grounded |
@@ -478,22 +488,20 @@ sequenceDiagram
 sequenceDiagram
     participant NF as NewsFeedAdapter
     participant DET as Deterministic candidate builder
-    participant TUB as Team Update Batch Agent
     participant TU as Team Update Agent
     participant AD as Article Data Agent
     participant LU as lookup_article_content
     participant HPO as Hourly Playlist Orchestrator Agent
 
     NF->>DET: fetch stories
-    DET->>DET: team filter + dedup + group updates + continuity
-    DET->>TUB: prepared team payloads
-    TUB->>TU: build_team_update_package(team)
+    DET->>DET: team filter + dedup + article body gate + group updates + continuity
+    DET->>TU: process_team_update(team)
     TU->>AD: digest_article_data(candidate)
     AD->>LU: lookup_article_content(url)
     LU-->>AD: stored article data
     AD-->>TU: article digest
-    TU-->>TUB: team package
-    TUB-->>HPO: eligible report summaries
+    TU-->>DET: report_ready package or no_update
+    DET-->>HPO: eligible report summaries
     HPO-->>DET: ranked hourly playlist
     DET-->>DET: validate, save, mark reports put_to_production
 ```

@@ -90,6 +90,30 @@
         cursor: default;
       }
 
+      .batch-bar {
+        display: grid;
+        gap: 0.45rem;
+        margin: 0.75rem 0 0;
+      }
+
+      .batch-label {
+        color: var(--muted);
+        font-size: 0.86rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+      }
+
+      select {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 0.9rem;
+        padding: 0.8rem 0.95rem;
+        background: var(--panel);
+        color: var(--ink);
+        font: inherit;
+      }
+
       audio {
         width: 100%;
         margin-top: 0.4rem;
@@ -175,6 +199,10 @@
           <button id="stop-button" class="secondary">Stop</button>
           <button id="reload-button" class="secondary">Reload Feed</button>
         </div>
+        <div id="batch-bar" class="batch-bar" hidden>
+          <label class="batch-label" for="batch-select">Batch</label>
+          <select id="batch-select"></select>
+        </div>
         <audio id="audio-player" controls preload="none"></audio>
         <div class="status">
           <span id="feed-source">Loading feed...</span>
@@ -190,6 +218,8 @@
       const playButton = document.getElementById("play-button");
       const stopButton = document.getElementById("stop-button");
       const reloadButton = document.getElementById("reload-button");
+      const batchBar = document.getElementById("batch-bar");
+      const batchSelect = document.getElementById("batch-select");
       const feedSource = document.getElementById("feed-source");
       const playbackMode = document.getElementById("playback-mode");
       const nowPlaying = document.getElementById("now-playing");
@@ -217,6 +247,7 @@
       function renderFeed() {
         queue.innerHTML = "";
         emptyState.hidden = feed.items.length > 0;
+        renderBatchOptions();
         feedSource.textContent = `Source: ${feed.source}`;
         playbackMode.textContent = feed.has_audio ? "Playback: TTS audio stream" : "Playback: browser speech synthesis";
         nowPlaying.textContent = "";
@@ -237,6 +268,26 @@
           `;
           queue.appendChild(row);
         });
+      }
+
+      function renderBatchOptions() {
+        const batches = Array.isArray(feed.available_batches) ? feed.available_batches : [];
+        batchBar.hidden = batches.length === 0;
+        batchSelect.innerHTML = "";
+
+        const latestOption = document.createElement("option");
+        latestOption.value = "";
+        latestOption.textContent = "Latest output";
+        batchSelect.appendChild(latestOption);
+
+        batches.forEach((batch) => {
+          const option = document.createElement("option");
+          option.value = batch.batch_id;
+          option.textContent = formatBatchLabel(batch);
+          batchSelect.appendChild(option);
+        });
+
+        batchSelect.value = feed.selected_batch || "";
       }
 
       function markCurrent(index) {
@@ -320,6 +371,28 @@
         markCurrent(-1);
       }
 
+      function formatBatchLabel(batch) {
+        const parts = [];
+        if (batch.generated_at) {
+          parts.push(new Date(batch.generated_at).toLocaleString());
+        }
+        parts.push(batch.batch_id);
+        if (batch.item_count) {
+          parts.push(`${batch.item_count} stories`);
+        }
+        return parts.join(" · ");
+      }
+
+      function updateBatchSelection(selectedBatch) {
+        const url = new URL(window.location.href);
+        if (selectedBatch) {
+          url.searchParams.set("batch", selectedBatch);
+        } else {
+          url.searchParams.delete("batch");
+        }
+        window.history.replaceState({}, "", url);
+      }
+
       function escapeHtml(text) {
         return String(text)
           .replaceAll("&", "&amp;")
@@ -340,6 +413,10 @@
         stopStream();
       });
       reloadButton.addEventListener("click", () => {
+        loadFeed();
+      });
+      batchSelect.addEventListener("change", () => {
+        updateBatchSelection(batchSelect.value);
         loadFeed();
       });
 

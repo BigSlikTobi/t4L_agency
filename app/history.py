@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 from app.schemas import (
     HourlyNarrativePlan,
+    HourlyStoryScriptBatchHistoryEntry,
     HourlyNarrativePlanHistoryEntry,
     HourlyPlaylist,
     HourlyPlaylistHistoryEntry,
@@ -517,6 +518,74 @@ class TeamUpdateHistoryStore:
         if row is None:
             return []
         return self.list_story_scripts(script_run_id=str(row["script_run_id"]))
+
+    def get_story_scripts_for_batch(
+        self,
+        *,
+        batch_run_id: str,
+    ) -> list[HourlyStoryScriptHistoryEntry]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT script_run_id
+                FROM hourly_story_script_history
+                WHERE batch_run_id = ?
+                ORDER BY generated_at DESC
+                LIMIT 1
+                """,
+                (batch_run_id,),
+            ).fetchone()
+
+        if row is None:
+            return []
+        return self.list_story_scripts(script_run_id=str(row["script_run_id"]))
+
+    def list_story_script_batches(self) -> list[HourlyStoryScriptBatchHistoryEntry]:
+        with self._connect() as connection:
+            batch_rows = connection.execute(
+                """
+                WITH ranked_batches AS (
+                    SELECT
+                        batch_run_id,
+                        script_run_id,
+                        playlist_id,
+                        language,
+                        generated_at,
+                        COUNT(*) OVER (
+                            PARTITION BY batch_run_id, script_run_id
+                        ) AS item_count,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY batch_run_id
+                            ORDER BY generated_at DESC, playlist_rank ASC
+                        ) AS row_number
+                    FROM hourly_story_script_history
+                )
+                SELECT
+                    batch_run_id,
+                    script_run_id,
+                    playlist_id,
+                    language,
+                    generated_at,
+                    item_count
+                FROM ranked_batches
+                WHERE row_number = 1
+                ORDER BY generated_at DESC, batch_run_id DESC
+                """
+            ).fetchall()
+
+            entries = [
+                HourlyStoryScriptBatchHistoryEntry(
+                    batch_run_id=str(batch_row["batch_run_id"]),
+                    script_run_id=str(batch_row["script_run_id"]),
+                    playlist_id=str(batch_row["playlist_id"]),
+                    language=str(batch_row["language"] or "en-US"),
+                    generated_at=datetime.fromisoformat(str(batch_row["generated_at"])),
+                    item_count=int(batch_row["item_count"]),
+                )
+                for batch_row in batch_rows
+            ]
+
+        return entries
 
     @staticmethod
     def _ensure_column(

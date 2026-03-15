@@ -28,6 +28,8 @@ from app.schemas import (
 class FakeTelemetry:
     enabled = True
     last_filters = None
+    last_comparison = None
+    last_runs_limit = None
 
     def dashboard_snapshot(self, *, from_time=None, to_time=None, run_id=None):
         self.last_filters = {
@@ -105,6 +107,50 @@ class FakeTelemetry:
                 "to": to_time.isoformat() if to_time is not None else None,
                 "run_id": run_id,
             },
+        }
+
+    def dashboard_comparison(self, *, left_run_id, right_run_id):
+        self.last_comparison = {
+            "left_run_id": left_run_id,
+            "right_run_id": right_run_id,
+        }
+        return {
+            "status": "ok",
+            "telemetry_enabled": True,
+            "export_configured": False,
+            "generated_at": datetime.now(UTC),
+            "left": self.dashboard_snapshot(run_id=left_run_id),
+            "right": self.dashboard_snapshot(run_id=right_run_id),
+            "delta": {
+                "requests": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cached_input_tokens": 0,
+                "reasoning_tokens": 0,
+                "total_tokens": 0,
+                "estimated_cost_usd": 0.0,
+            },
+        }
+
+    def dashboard_historical_runs(self, *, limit=200):
+        self.last_runs_limit = limit
+        return {
+            "status": "ok",
+            "telemetry_enabled": True,
+            "export_configured": False,
+            "generated_at": datetime.now(UTC),
+            "runs": [
+                {
+                    "run_id": "run-b",
+                    "workflow": "NFL Radio Agency",
+                    "finished_at": datetime(2026, 3, 14, 12, 0, tzinfo=UTC),
+                },
+                {
+                    "run_id": "run-a",
+                    "workflow": "NFL Radio Agency",
+                    "finished_at": datetime(2026, 3, 14, 11, 30, tzinfo=UTC),
+                },
+            ],
         }
 
 
@@ -453,6 +499,7 @@ def test_qa_player_page_loads() -> None:
 
     assert response.status_code == 200
     assert "QA Radio Player" in response.text
+    assert 'id="batch-select"' in response.text
     assert "/qa/player-feed" in response.text
 
 
@@ -514,6 +561,39 @@ def test_usage_dashboard_live_forwards_filters() -> None:
     assert payload["applied_filters"]["run_id"] == "run-123"
 
 
+def test_usage_dashboard_compare_returns_side_by_side_runs() -> None:
+    app = create_app(settings=build_settings(), orchestrator=FakeOrchestrator())
+    fake_telemetry = FakeTelemetry()
+
+    with TestClient(app) as client:
+        app.state.telemetry = fake_telemetry
+        response = client.get(
+            "/observability/usage/compare",
+            params={"left_run_id": "run-a", "right_run_id": "run-b"},
+        )
+
+    assert response.status_code == 200
+    assert fake_telemetry.last_comparison == {"left_run_id": "run-a", "right_run_id": "run-b"}
+    payload = response.json()
+    assert payload["left"]["applied_filters"]["run_id"] == "run-a"
+    assert payload["right"]["applied_filters"]["run_id"] == "run-b"
+
+
+def test_usage_dashboard_runs_returns_historical_run_options() -> None:
+    app = create_app(settings=build_settings(), orchestrator=FakeOrchestrator())
+    fake_telemetry = FakeTelemetry()
+
+    with TestClient(app) as client:
+        app.state.telemetry = fake_telemetry
+        response = client.get("/observability/usage/runs", params={"limit": 50})
+
+    assert response.status_code == 200
+    assert fake_telemetry.last_runs_limit == 50
+    payload = response.json()
+    assert payload["runs"][0]["run_id"] == "run-b"
+    assert payload["runs"][0]["finished_at"] == "2026-03-14T12:00:00Z"
+
+
 def test_qa_player_feed_prefers_latest_scripts_artifact(tmp_path: Path) -> None:
     settings = build_settings(team_update_history_sqlite_path=tmp_path / "team_update_history.sqlite3")
     scripts_path = settings.team_update_history_sqlite_path.parent / "scripts.json"
@@ -567,6 +647,8 @@ def test_qa_player_feed_prefers_latest_scripts_artifact(tmp_path: Path) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["source"] == "artifact"
+    assert payload["selected_batch"] == ""
+    assert payload["available_batches"] == []
     assert payload["has_audio"] is True
     assert payload["items"][0]["audio_url"] == "https://example.com/vikings-update.mp3"
     assert payload["items"][0]["script_text"] == "Intro Body Outro"
@@ -717,8 +799,52 @@ def test_qa_player_feed_falls_back_to_latest_history_scripts(tmp_path: Path) -> 
     assert response.status_code == 200
     payload = response.json()
     assert payload["source"] == "history"
+    assert payload["selected_batch"] == "batch-1"
     assert payload["script_run_id"] == "script-run-1"
     assert payload["playlist_id"] == "playlist-1"
     assert payload["has_audio"] is False
+    assert payload["available_batches"][0]["batch_id"] == "batch-1"
     assert [item["team"] for item in payload["items"]] == ["MIN", "DET"]
     assert payload["items"][0]["script_text"] == "Intro Body Outro"
+
+
+def test_qa_player_feed_lists_batches_newest_first_and_loads_requested_batch(tmp_path: Path) -> None:
+    settings = build_settings(team_update_history_sqlite_path=tmp_path / "team_update_history.sqlite3")
+    store = TeamUpdateHistoryStore(settings.team_update_history_sqlite_path)
+    store.save_story_scripts(
+        script_run_id="script-run-older",
+        playlist_id="playlist-older",
+        batch_run_id="batch-older",
+        generated_at=datetime(2026, 3, 12, 9, 0, tzinfo=UTC),
+        scripts=[
+            make_radio_story_script(team="MIN", playlist_rank=1),
+            make_radio_story_script(team="DET", playlist_rank=2),
+        ],
+    )
+    store.save_story_scripts(
+        script_run_id="script-run-newer",
+        playlist_id="playlist-newer",
+        batch_run_id="batch-newer",
+        generated_at=datetime(2026, 3, 13, 10, 30, tzinfo=UTC),
+        scripts=[
+            make_radio_story_script(team="BUF", playlist_rank=1),
+        ],
+    )
+    app = create_app(settings=settings, orchestrator=FakeOrchestrator())
+    client = TestClient(app)
+
+    response = client.get("/qa/player-feed", params={"batch": "batch-older"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source"] == "history"
+    assert payload["selected_batch"] == "batch-older"
+    assert [batch["batch_id"] for batch in payload["available_batches"]] == [
+        "batch-newer",
+        "batch-older",
+    ]
+    assert payload["available_batches"][0]["item_count"] == 1
+    assert payload["available_batches"][1]["item_count"] == 2
+    assert payload["script_run_id"] == "script-run-older"
+    assert payload["playlist_id"] == "playlist-older"
+    assert [item["team"] for item in payload["items"]] == ["MIN", "DET"]

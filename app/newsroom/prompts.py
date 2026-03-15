@@ -11,7 +11,9 @@ import yaml
 PROMPTS_PATH = Path(__file__).with_name("prompts.yml")
 REQUIRED_PROMPTS = {
     "article_data_agent",
+    "article_data_direct",
     "team_news_agent",
+    "team_update_gate",
     "team_update_agent",
     "team_update_batch_agent",
     "hourly_playlist_orchestrator_agent",

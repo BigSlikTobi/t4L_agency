@@ -31,17 +31,14 @@ from app.constants import (
 )
 from app.history import TeamUpdateHistoryStore
 from app.newsroom.agents import (
-    build_article_data_agent,
     build_hourly_narrative_planner_agent,
     build_hourly_playlist_orchestrator_agent,
     build_hourly_script_batch_agent,
     build_radio_script_writer_agent,
     build_team_update_agent,
-    build_team_update_batch_agent,
 )
 from app.newsroom.context import TeamUpdateRunContext
 from app.newsroom.helpers import (
-    _compact_candidate,
     apply_hourly_narrative_plan,
     build_tts_batch_create_request,
     build_tts_batch_process_request,
@@ -49,7 +46,6 @@ from app.newsroom.helpers import (
     build_hourly_script_batch_input,
     build_radio_script_story_inputs,
     build_hourly_playlist_input,
-    build_team_update_batch_input,
     build_team_update_input,
     coerce_output,
     filter_stories_for_team,
@@ -58,7 +54,7 @@ from app.newsroom.tools import (
     build_article_data_tool,
     build_article_lookup_tool,
     build_radio_story_script_tool,
-    build_team_update_tool,
+    process_team_update,
 )
 from app.newsroom.tracing import build_run_config
 from app.telemetry import get_active_telemetry_manager
@@ -79,7 +75,9 @@ from app.schemas import (
     RadioStoryScript,
     RadioStoryScriptDraft,
     ScriptDirectionPronunciation,
+    StoredArticleRecord,
     StoryGroupUpdatesToolResponse,
+    TeamUpdateAgentResult,
     TeamUpdateBatchAgentReport,
     TeamUpdateBatchAgentResult,
     TeamUpdateBatchRequest,
@@ -89,11 +87,22 @@ from app.schemas import (
     TeamUpdatePackage,
     TeamUpdateReport,
     TeamUpdateReportRequest,
+    TeamUpdateTeamInput,
 )
 
 logger = logging.getLogger(__name__)
 
 _CONCURRENT_LOOKUP_LIMIT: Final[int] = 10
+_ARTICLE_BODY_MIN_WORDS: Final[int] = 8
+_ARTICLE_BODY_MIN_CHARS: Final[int] = 45
+_ARTICLE_BODY_BOILERPLATE_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(r"javascript"),
+    re.compile(r"cookie policy|privacy policy|terms of use"),
+    re.compile(r"sign up|subscribe"),
+    re.compile(r"newsletter"),
+    re.compile(r"all rights reserved"),
+    re.compile(r"advertisement"),
+)
 _TTS_TERMINAL_FAILURE_STATES: Final[frozenset[str]] = frozenset(
     {
         "JOB_STATE_CANCELLED",
@@ -135,19 +144,10 @@ class TeamUpdateWorkflow:
         os.environ.setdefault("OPENAI_API_KEY", settings.openai_api_key.get_secret_value())
 
         self.article_lookup_tool = build_article_lookup_tool(article_lookup)
-        self.article_data_agent = build_article_data_agent(
-            settings,
-            article_lookup_tool=self.article_lookup_tool,
-        )
-        self.article_data_tool = build_article_data_tool(self.article_data_agent)
+        self.article_data_tool = build_article_data_tool(article_lookup, settings)
         self.team_update_agent = build_team_update_agent(
             settings,
             article_data_tool=self.article_data_tool,
-        )
-        self.team_update_tool = build_team_update_tool(self.team_update_agent)
-        self.team_update_batch_agent = build_team_update_batch_agent(
-            settings,
-            team_update_tool=self.team_update_tool,
         )
         self.hourly_playlist_orchestrator_agent = build_hourly_playlist_orchestrator_agent(settings)
         self.script_generation_stacks = {
@@ -214,7 +214,38 @@ class TeamUpdateWorkflow:
             max_turns=max(6, len(context.candidate_stories) + 2),
             auto_previous_response_id=True,
         )
-        package = coerce_output(result.final_output, TeamUpdatePackage)
+        team_update_result = coerce_output(result.final_output, TeamUpdateAgentResult)
+        if team_update_result.status == "no_update":
+            if team_update_result.skip_reason:
+                logger.info(
+                    "Team update agent skipped team",
+                    extra={
+                        "run_id": context.run_id,
+                        "team": context.request.team,
+                        "skip_reason": team_update_result.skip_reason,
+                    },
+                )
+            report = TeamUpdateReport(
+                run_id=context.run_id,
+                generated_at=context.generated_at,
+                team=context.request.team,
+                lookback_minutes=context.request.lookback_minutes,
+                status="no_update",
+                coverage=self._build_coverage(context),
+                warnings=context.warnings,
+            )
+            self._history_store.save_report(
+                report=report,
+                batch_run_id=context.run_id,
+                source_story_ids=[],
+                source_urls=[],
+                source_group_ids=[],
+            )
+            return report
+
+        package = team_update_result.report
+        if package is None:
+            raise ValueError("Team update agent returned report_ready without a report package.")
         report = TeamUpdateReport(
             run_id=context.run_id,
             generated_at=context.generated_at,
@@ -250,7 +281,6 @@ class TeamUpdateWorkflow:
             extra={"run_id": run_id, "team_count": len(team_codes)},
         )
         team_contexts: list[TeamUpdateRunContext] = []
-        selected_team_payloads: list[dict] = []
         for team_code in team_codes:
             context = TeamUpdateRunContext(
                 request=TeamUpdateReportRequest(
@@ -263,46 +293,24 @@ class TeamUpdateWorkflow:
             context.feed_stories = list(feed_stories)
             await self._prepare_team_context(context, skip_feed_fetch=True)
             team_contexts.append(context)
-            selected_team_payloads.append({
-                "team_code": team_code,
-                "team_name": str(NFL_TEAMS[team_code]["name"]),
-                "lookback_minutes": request.lookback_minutes,
-                "candidate_stories": [
-                    _compact_candidate(candidate)
-                    for candidate in context.candidate_stories
-                ],
-            })
 
         logger.info(
-            "Running team update batch agent",
+            "Running deterministic team update dispatch",
             extra={"run_id": run_id, "team_count": len(team_contexts)},
         )
-        chunk_size = self._settings.team_update_batch_chunk_size
-        all_batch_reports: list[object] = []
-        for chunk_index in range(0, len(selected_team_payloads), chunk_size):
-            chunk = selected_team_payloads[chunk_index : chunk_index + chunk_size]
-            chunk_result = await Runner.run(
-                self.team_update_batch_agent,
-                build_team_update_batch_input(run_id, request, chunk),
-                run_config=build_run_config(
-                    run_id,
-                    stage="team_update_batch_agent",
-                    metadata={
-                        "team_count": str(len(chunk)),
-                        "chunk": f"{chunk_index // chunk_size + 1}",
-                    },
-                ),
-                max_turns=max(8, len(chunk) + 4),
-                auto_previous_response_id=True,
+        context_by_team = {ctx.request.team: ctx for ctx in team_contexts}
+        tasks = [
+            self._process_single_team_in_batch(
+                team_code=tc,
+                context=context_by_team[tc],
+                request=request,
+                run_id=run_id,
             )
-            chunk_output = _validate_team_update_batch_reports(
-                coerce_output(chunk_result.final_output, TeamUpdateBatchAgentResult),
-                selected_team_payloads=chunk,
-            )
-            all_batch_reports.extend(chunk_output.reports)
-        batch_output = TeamUpdateBatchAgentResult(reports=all_batch_reports)
+            for tc in team_codes
+        ]
+        batch_reports = await asyncio.gather(*tasks)
+        batch_output = TeamUpdateBatchAgentResult(reports=list(batch_reports))
 
-        context_by_team = {context.request.team: context for context in team_contexts}
         reports: list[TeamUpdateReport] = []
         for item in batch_output.reports:
             context = context_by_team[item.team]
@@ -337,6 +345,45 @@ class TeamUpdateWorkflow:
             extra={"run_id": run_id, "report_count": len(reports)},
         )
         return batch_response
+
+    async def _process_single_team_in_batch(
+        self,
+        *,
+        team_code: str,
+        context: TeamUpdateRunContext,
+        request: TeamUpdateBatchRequest,
+        run_id: str,
+    ) -> TeamUpdateBatchAgentReport:
+        """Deterministic per-team dispatch: skip if no candidates, else gate+agent."""
+        if not context.candidate_stories:
+            return TeamUpdateBatchAgentReport(
+                team=team_code,
+                lookback_minutes=request.lookback_minutes,
+                status="no_update",
+            )
+
+        team_name = str(NFL_TEAMS[team_code]["name"])
+        team_input = TeamUpdateTeamInput(
+            team_code=team_code,
+            team_name=team_name,
+            lookback_minutes=request.lookback_minutes,
+            candidate_stories=context.candidate_stories,
+        )
+        agent_result = await process_team_update(
+            team_input=team_input,
+            team_update_agent=self.team_update_agent,
+            run_config=build_run_config(
+                run_id,
+                stage="team_update_batch_dispatch",
+                metadata={"team": team_code},
+            ),
+        )
+        return TeamUpdateBatchAgentReport(
+            team=team_code,
+            lookback_minutes=request.lookback_minutes,
+            status=agent_result.status,
+            report=agent_result.report,
+        )
 
     async def _prepare_team_context(
         self,
@@ -429,6 +476,11 @@ class TeamUpdateWorkflow:
             story, article_lookup = result
             if not article_lookup.found or article_lookup.article is None:
                 context.warnings.append(f"No stored article data found for {story.url}")
+                continue
+            if not _stored_article_body_is_usable(article_lookup.article):
+                context.warnings.append(
+                    f"Skipping unusable stored article content for {story.url}"
+                )
                 continue
             if not article_lookup.article.group_id:
                 context.warnings.append(f"Stored article is missing group_id for {story.url}")
@@ -643,7 +695,25 @@ class TeamUpdateWorkflow:
                 "Saved hourly playlist is missing one or more matching produced team reports."
             )
 
+        logger.info(
+            "Starting hourly playlist script generation for playlist %s in %s with %d selected stories (tts=%s)",
+            playlist_entry.id,
+            request.language,
+            len(selected_stories),
+            request.enable_tts,
+            extra={
+                "run_id": script_run_id,
+                "language": request.language,
+                "story_count": len(selected_stories),
+            },
+        )
+
         if not selected_stories:
+            logger.info(
+                "Skipping script generation because playlist %s has no produced stories",
+                playlist_entry.id,
+                extra={"run_id": script_run_id, "language": request.language},
+            )
             return HourlyPlaylistScriptsRunResult(
                 script_run_id=script_run_id,
                 playlist_id=playlist_entry.id,
@@ -669,8 +739,12 @@ class TeamUpdateWorkflow:
                 reusable_entry.narrative_plan_json,
             )
             logger.info(
-                "Reusing existing narrative plan for playlist",
+                "Reusing existing narrative plan for playlist %s from %s to %s",
+                playlist_entry.id,
+                reusable_entry.language,
+                request.language,
                 extra={
+                    "run_id": script_run_id,
                     "playlist_id": playlist_entry.id,
                     "source_language": reusable_entry.language,
                     "target_language": request.language,
@@ -685,6 +759,18 @@ class TeamUpdateWorkflow:
                 HourlyNarrativePlan.model_validate(prior_narrative_entry.narrative_plan_json)
                 if prior_narrative_entry is not None
                 else None
+            )
+            logger.info(
+                "Running hourly narrative planner for playlist %s in %s with %d stories",
+                playlist_entry.id,
+                request.language,
+                len(selected_stories),
+                extra={
+                    "run_id": script_run_id,
+                    "language": request.language,
+                    "playlist_id": playlist_entry.id,
+                    "story_count": len(selected_stories),
+                },
             )
             narrative_result = await Runner.run(
                 script_stack.hourly_narrative_planner_agent,
@@ -707,6 +793,16 @@ class TeamUpdateWorkflow:
                 auto_previous_response_id=True,
             )
             narrative_plan = coerce_output(narrative_result.final_output, HourlyNarrativePlan)
+            logger.info(
+                "Completed hourly narrative planner for playlist %s in %s",
+                playlist_entry.id,
+                request.language,
+                extra={
+                    "run_id": script_run_id,
+                    "language": request.language,
+                    "playlist_id": playlist_entry.id,
+                },
+            )
 
         self._history_store.save_hourly_narrative_plan(
             script_run_id=script_run_id,
@@ -719,9 +815,37 @@ class TeamUpdateWorkflow:
         selected_stories = apply_hourly_narrative_plan(selected_stories, narrative_plan)
 
         script_chunk_size = self._settings.script_batch_chunk_size
+        total_chunks = math.ceil(len(selected_stories) / script_chunk_size)
+        logger.info(
+            "Generating %d scripts for playlist %s in %d chunk(s)",
+            len(selected_stories),
+            playlist_entry.id,
+            total_chunks,
+            extra={
+                "run_id": script_run_id,
+                "language": request.language,
+                "playlist_id": playlist_entry.id,
+                "story_count": len(selected_stories),
+            },
+        )
         all_script_drafts: list[RadioStoryScriptDraft] = []
         for chunk_index in range(0, len(selected_stories), script_chunk_size):
             story_chunk = selected_stories[chunk_index : chunk_index + script_chunk_size]
+            current_chunk = chunk_index // script_chunk_size + 1
+            logger.info(
+                "Generating script chunk %d/%d for playlist %s with %d stories",
+                current_chunk,
+                total_chunks,
+                playlist_entry.id,
+                len(story_chunk),
+                extra={
+                    "run_id": script_run_id,
+                    "language": request.language,
+                    "playlist_id": playlist_entry.id,
+                    "story_count": len(story_chunk),
+                    "chunk": str(current_chunk),
+                },
+            )
             chunk_result = await Runner.run(
                 script_stack.hourly_script_batch_agent,
                 build_hourly_script_batch_input(
@@ -746,6 +870,18 @@ class TeamUpdateWorkflow:
             )
             chunk_output = coerce_output(chunk_result.final_output, HourlyPlaylistScriptsBatchAgentResult)
             all_script_drafts.extend(chunk_output.scripts)
+            logger.info(
+                "Completed script chunk %d/%d for playlist %s",
+                current_chunk,
+                total_chunks,
+                playlist_entry.id,
+                extra={
+                    "run_id": script_run_id,
+                    "language": request.language,
+                    "playlist_id": playlist_entry.id,
+                    "chunk": str(current_chunk),
+                },
+            )
         batch_output = HourlyPlaylistScriptsBatchAgentResult(scripts=all_script_drafts)
         scripts = _normalize_radio_story_scripts(
             batch_output.scripts,
@@ -760,9 +896,53 @@ class TeamUpdateWorkflow:
             generated_at=generated_at,
             scripts=scripts,
         )
+        logger.info(
+            "Saved %d generated scripts for playlist %s in %s",
+            len(scripts),
+            playlist_entry.id,
+            request.language,
+            extra={
+                "run_id": script_run_id,
+                "language": request.language,
+                "playlist_id": playlist_entry.id,
+                "story_count": len(scripts),
+            },
+        )
         tts_batch = None
         if request.enable_tts:
+            logger.info(
+                "Starting TTS batch generation for playlist %s with %d scripts",
+                playlist_entry.id,
+                len(scripts),
+                extra={
+                    "run_id": script_run_id,
+                    "language": request.language,
+                    "playlist_id": playlist_entry.id,
+                    "story_count": len(scripts),
+                },
+            )
             tts_batch = await self._run_tts_batch(script_run_id=script_run_id, scripts=scripts)
+        else:
+            logger.info(
+                "Skipping TTS batch generation for playlist %s because tts is disabled",
+                playlist_entry.id,
+                extra={
+                    "run_id": script_run_id,
+                    "language": request.language,
+                    "playlist_id": playlist_entry.id,
+                },
+            )
+        logger.info(
+            "Completed hourly playlist script generation for playlist %s in %s",
+            playlist_entry.id,
+            request.language,
+            extra={
+                "run_id": script_run_id,
+                "language": request.language,
+                "playlist_id": playlist_entry.id,
+                "story_count": len(scripts),
+            },
+        )
         return HourlyPlaylistScriptsRunResult(
             script_run_id=script_run_id,
             playlist_id=playlist_entry.id,
@@ -833,17 +1013,40 @@ class TeamUpdateWorkflow:
         if self._tts_batch is None:
             raise RuntimeError("TTS batch workflow is not configured.")
 
+        logger.info(
+            "Submitting TTS batch for %d scripts",
+            len(scripts),
+            extra={"run_id": script_run_id, "story_count": len(scripts)},
+        )
         create_request = build_tts_batch_create_request(scripts, settings=self._settings)
         batch_job = await self._tts_batch.create_batch(create_request)
+        logger.info(
+            "Created TTS batch %s with initial status %s",
+            batch_job.batch_id,
+            batch_job.status,
+            extra={"run_id": script_run_id, "batch_id": batch_job.batch_id},
+        )
         completed_batch = await self._wait_for_tts_batch(
             script_run_id=script_run_id,
             batch_id=batch_job.batch_id,
+        )
+        logger.info(
+            "TTS batch %s reached terminal success status; starting asset processing",
+            completed_batch.batch_id,
+            extra={"run_id": script_run_id, "batch_id": completed_batch.batch_id},
         )
         processed_batch = await self._tts_batch.process_batch(
             build_tts_batch_process_request(
                 batch_id=completed_batch.batch_id,
                 settings=self._settings,
             )
+        )
+        logger.info(
+            "Processed TTS batch %s with %d successful items and %d failures",
+            processed_batch.batch_id,
+            processed_batch.processed_count,
+            processed_batch.failed_count,
+            extra={"run_id": script_run_id, "batch_id": processed_batch.batch_id},
         )
         self._record_tts_batch_usage(
             script_run_id=script_run_id,
@@ -862,8 +1065,11 @@ class TeamUpdateWorkflow:
         script_run_id: str,
         batch_id: str,
     ) -> GeminiTTSBatchJobStatus:
-        deadline = asyncio.get_running_loop().time() + self._settings.gemini_tts_batch_timeout_seconds
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._settings.gemini_tts_batch_timeout_seconds
+        attempt = 0
         while True:
+            attempt += 1
             status = await self._tts_batch.fetch_batch_status(
                 GeminiTTSBatchStatusRequest(
                     batch_id=batch_id,
@@ -871,7 +1077,10 @@ class TeamUpdateWorkflow:
                 )
             )
             logger.info(
-                "Checked TTS batch status",
+                "TTS batch %s poll %d returned status %s",
+                batch_id,
+                attempt,
+                status.status,
                 extra={
                     "run_id": script_run_id,
                     "batch_id": batch_id,
@@ -885,7 +1094,7 @@ class TeamUpdateWorkflow:
                 raise ValueError(
                     f"TTS batch {batch_id} did not succeed. Final status: {status.status}{detail}"
                 )
-            if asyncio.get_running_loop().time() >= deadline:
+            if loop.time() >= deadline:
                 raise TimeoutError(
                     f"TTS batch {batch_id} did not finish within "
                     f"{self._settings.gemini_tts_batch_timeout_seconds} seconds."
@@ -956,6 +1165,29 @@ def _selected_source_articles(report: TeamUpdatePackage) -> list:
     for topic in report.topics:
         selected_sources.extend(topic.source_articles)
     return selected_sources
+
+
+def _normalize_article_body(text: str | None) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _stored_article_body_is_usable(article: StoredArticleRecord) -> bool:
+    normalized_body = _normalize_article_body(article.content)
+    if not normalized_body:
+        return False
+
+    words = re.findall(r"\b[\w'-]+\b", normalized_body)
+    if len(words) < _ARTICLE_BODY_MIN_WORDS or len(normalized_body) < _ARTICLE_BODY_MIN_CHARS:
+        return False
+
+    lowered_body = normalized_body.casefold()
+    boilerplate_hits = sum(
+        1 for pattern in _ARTICLE_BODY_BOILERPLATE_PATTERNS if pattern.search(lowered_body)
+    )
+    if boilerplate_hits >= 2 and len(words) < 80:
+        return False
+
+    return True
 
 
 def _normalize_radio_story_scripts(
@@ -1223,61 +1455,6 @@ def _validate_hourly_playlist_selection(
     return HourlyPlaylist(selected_count=len(normalized_items), items=normalized_items)
 
 
-def _validate_team_update_batch_reports(
-    batch_result: TeamUpdateBatchAgentResult,
-    *,
-    selected_team_payloads: list[dict[str, object]],
-) -> TeamUpdateBatchAgentResult:
-    expected_teams = [str(payload["team_code"]) for payload in selected_team_payloads]
-    reports_by_team: dict[str, TeamUpdateBatchAgentReport] = {}
-
-    for report in batch_result.reports:
-        if report.team in reports_by_team:
-            raise ValueError(f"Batch agent returned duplicate report entry for team {report.team}.")
-        if report.team not in expected_teams:
-            raise ValueError(f"Batch agent returned unexpected team {report.team}.")
-        reports_by_team[report.team] = report
-
-    missing_teams = [team for team in expected_teams if team not in reports_by_team]
-    if missing_teams:
-        raise ValueError(
-            "Batch agent omitted report entries for teams: "
-            + ", ".join(missing_teams)
-            + "."
-        )
-
-    normalized_reports: list[TeamUpdateBatchAgentReport] = []
-    for payload in selected_team_payloads:
-        team = str(payload["team_code"])
-        candidate_stories = payload["candidate_stories"]
-        if not isinstance(candidate_stories, list):
-            raise ValueError(f"Invalid candidate story payload for team {team}.")
-
-        report = reports_by_team[team]
-        expected_status = "report_ready" if candidate_stories else "no_update"
-        if report.status != expected_status:
-            raise ValueError(
-                f"Batch agent returned status={report.status} for team {team}; "
-                f"expected {expected_status}."
-            )
-
-        expected_lookback = int(payload["lookback_minutes"])
-        if report.lookback_minutes != expected_lookback:
-            raise ValueError(
-                f"Batch agent returned lookback_minutes={report.lookback_minutes} for team {team}; "
-                f"expected {expected_lookback}."
-            )
-
-        normalized_reports.append(
-            TeamUpdateBatchAgentReport(
-                team=team,
-                lookback_minutes=expected_lookback,
-                status=report.status,
-                report=report.report,
-            )
-        )
-
-    return TeamUpdateBatchAgentResult(reports=normalized_reports)
 
 
 def _fallback_update_from_article_timestamp(

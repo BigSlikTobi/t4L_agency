@@ -27,6 +27,8 @@ from app.schemas import (
     TeamUpdateBatchResponse,
     TeamUpdateReport,
     TeamUpdateReportRequest,
+    UsageTelemetryComparison,
+    UsageTelemetryRunSummaryResponse,
     UsageTelemetrySnapshot,
 )
 from app.usage_dashboard import load_usage_dashboard_html
@@ -142,6 +144,54 @@ def create_app(
                 run_id=run_id.strip() if run_id else None,
             )
         )
+
+    @app.get("/observability/usage/compare", response_model=UsageTelemetryComparison)
+    async def usage_dashboard_compare(
+        left_run_id: str = Query(..., min_length=1),
+        right_run_id: str = Query(..., min_length=1),
+    ) -> UsageTelemetryComparison:
+        telemetry = app.state.telemetry
+        left_run = left_run_id.strip()
+        right_run = right_run_id.strip()
+        if telemetry is None or not hasattr(telemetry, "dashboard_comparison"):
+            left_snapshot = UsageTelemetrySnapshot(
+                status="ok",
+                telemetry_enabled=False,
+                export_configured=False,
+                generated_at=datetime.now(UTC),
+                applied_filters={"from": None, "to": None, "run_id": left_run},
+            )
+            right_snapshot = UsageTelemetrySnapshot(
+                status="ok",
+                telemetry_enabled=False,
+                export_configured=False,
+                generated_at=datetime.now(UTC),
+                applied_filters={"from": None, "to": None, "run_id": right_run},
+            )
+            return UsageTelemetryComparison(
+                status="ok",
+                telemetry_enabled=False,
+                export_configured=False,
+                generated_at=datetime.now(UTC),
+                left=left_snapshot,
+                right=right_snapshot,
+            )
+        return UsageTelemetryComparison.model_validate(
+            telemetry.dashboard_comparison(left_run_id=left_run, right_run_id=right_run)
+        )
+
+    @app.get("/observability/usage/runs", response_model=UsageTelemetryRunSummaryResponse)
+    async def usage_dashboard_runs(limit: int = Query(default=200, ge=1, le=500)) -> UsageTelemetryRunSummaryResponse:
+        telemetry = app.state.telemetry
+        if telemetry is None or not hasattr(telemetry, "dashboard_historical_runs"):
+            return UsageTelemetryRunSummaryResponse(
+                status="ok",
+                telemetry_enabled=False,
+                export_configured=False,
+                generated_at=datetime.now(UTC),
+                runs=[],
+            )
+        return UsageTelemetryRunSummaryResponse.model_validate(telemetry.dashboard_historical_runs(limit=limit))
 
     return app
 

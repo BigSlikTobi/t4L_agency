@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 import json
+import logging
 from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from app.cli import app as cli_app
 from app.history import TeamUpdateHistoryStore
 from app.newsroom.context import TeamUpdateRunContext
 from app.newsroom.helpers import apply_hourly_narrative_plan, build_hourly_script_batch_input
+from app.newsroom.tools import process_team_update
 from app.telemetry import configure_telemetry
 from app.newsroom.workflow import TeamUpdateWorkflow
 from app.schemas import (
@@ -22,6 +24,7 @@ from app.schemas import (
     HourlyNarrativePlan,
     HourlyPlaylist,
     HourlyPlaylistItem,
+    HourlyPlaylistSelection,
     HourlyPlaylistScriptsRequest,
     HourlyPlaylistScriptsResponse,
     RadioNarrativeContext,
@@ -31,13 +34,16 @@ from app.schemas import (
     StoredArticleRecord,
     StoryGroupUpdate,
     StoryGroupUpdatesToolResponse,
+    TeamUpdateAgentResult,
+    TeamUpdateBatchAgentNanoReport,
     TeamUpdateBatchRequest,
-    TeamUpdateBatchAgentResult,
     TeamUpdateBatchAgentReport,
     TeamUpdateBatchResponse,
+    TeamUpdateCandidate,
     TeamUpdatePackage,
     TeamUpdateReport,
     TeamUpdateReportRequest,
+    TeamUpdateTeamInput,
     TeamUpdateTopic,
     TTSBatchResult,
 )
@@ -198,6 +204,10 @@ def make_article_lookup_response(
     url: str = "https://example.com/story-1",
     group_id: str = "group-1",
     updated_at: datetime | None = None,
+    content: str = (
+        "Minnesota added a clearly reported roster update with named parties, timing, and "
+        "contract detail so the workflow has enough body text to treat the article as usable."
+    ),
 ) -> ArticleContentLookupToolResponse:
     return ArticleContentLookupToolResponse(
         requested_url=url,
@@ -206,7 +216,7 @@ def make_article_lookup_response(
             url=url,
             cite_url=url,
             header="Header",
-            content="Body",
+            content=content,
             description="Deck",
             author="Reporter",
             category="Breaking News",
@@ -299,6 +309,100 @@ def make_team_update_report(
         coverage={},
         warnings=[],
     )
+
+
+def make_team_update_agent_result(
+    *,
+    status: str = "report_ready",
+    report: TeamUpdatePackage | None = None,
+    skip_reason: str | None = None,
+) -> TeamUpdateAgentResult:
+    resolved_report = report
+    if status == "report_ready" and resolved_report is None:
+        resolved_report = TeamUpdatePackage(
+            total_duration_seconds=180,
+            headline="Team update package",
+            topics=[make_topic()],
+            source_articles=[],
+        )
+    return TeamUpdateAgentResult(
+        status=status,
+        report=resolved_report,
+        skip_reason=skip_reason,
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_team_update_runs_agent_when_gate_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team_input = TeamUpdateTeamInput(
+        team_code="MIN",
+        team_name="Minnesota Vikings",
+        lookback_minutes=60,
+        candidate_stories=[
+            TeamUpdateCandidate(
+                story_id="story-1",
+                url="https://example.com/story-1",
+                title="Roster update",
+                source_name="ESPN",
+                category="Breaking News",
+                team_code="MIN",
+                group_id="group-1",
+                framing="new",
+                continuity="new_story",
+            )
+        ],
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_runner(agent, message, **kwargs):
+        captured["message"] = message
+        captured["max_turns"] = kwargs.get("max_turns")
+        return SimpleNamespace(final_output=make_team_update_agent_result())
+
+    monkeypatch.setattr("app.newsroom.tools.Runner.run", fake_runner)
+
+    result = await process_team_update(
+        team_input=team_input,
+        team_update_agent=SimpleNamespace(name="Team Update Agent"),
+        run_config=SimpleNamespace(group_id="batch-run-1"),
+    )
+
+    assert result.status == "report_ready"
+    assert captured["message"] == team_input.model_dump_json()
+    assert captured["max_turns"] == 6
+
+
+@pytest.mark.asyncio
+async def test_process_team_update_skips_agent_when_gate_rejects() -> None:
+    team_input = TeamUpdateTeamInput(
+        team_code="MIN",
+        team_name="Minnesota Vikings",
+        lookback_minutes=60,
+        candidate_stories=[
+            TeamUpdateCandidate(
+                story_id="story-1",
+                url="https://example.com/story-1",
+                title="Old follow-up",
+                source_name="ESPN",
+                team_code="MIN",
+                group_id="group-1",
+                framing="update",
+                continuity="follow_up_to_tracked_story",
+                recent_group_updates=[],
+            )
+        ],
+    )
+
+    result = await process_team_update(
+        team_input=team_input,
+        team_update_agent=SimpleNamespace(name="Team Update Agent"),
+        run_config=SimpleNamespace(group_id="batch-run-1"),
+    )
+
+    assert result.status == "no_update"
+    assert "no new stories" in result.skip_reason
 
 
 def make_radio_story_script(
@@ -441,9 +545,8 @@ def test_team_update_workflow_uses_agent_specific_model_overrides(tmp_path: Path
         tts_batch=FakeGeminiTTSBatchAdapter(),
     )
 
-    assert workflow.article_data_agent.model == "article-model"
     assert workflow.team_update_agent.model == "team-update-model"
-    assert workflow.team_update_batch_agent.model == "batch-model"
+    assert not hasattr(workflow, "team_update_batch_agent")
     assert workflow.hourly_playlist_orchestrator_agent.model == "playlist-model"
     assert workflow.hourly_narrative_planner_agent.model == "narrative-planner-model"
     assert workflow.radio_script_writer_agent.model == "script-model"
@@ -660,6 +763,56 @@ def test_team_update_batch_agent_report_normalizes_full_team_name() -> None:
     assert report.team == "ARI"
 
 
+def test_deterministic_gate_returns_go_for_new_candidate() -> None:
+    from app.newsroom.tools import _deterministic_gate
+
+    candidate = TeamUpdateCandidate(
+        story_id="s1", url="https://example.com/s1", title="New signing",
+        source_name="ESPN", team_code="MIN", group_id="g1",
+        framing="new", continuity="new_story",
+    )
+    result = _deterministic_gate([candidate])
+    assert result.decision == "go"
+
+
+def test_deterministic_gate_returns_go_for_update_with_group_activity() -> None:
+    from app.newsroom.tools import _deterministic_gate
+
+    candidate = TeamUpdateCandidate(
+        story_id="s1", url="https://example.com/s1", title="Trade follow-up",
+        source_name="ESPN", team_code="MIN", group_id="g1",
+        framing="update", continuity="follow_up_to_tracked_story",
+        recent_group_updates=[
+            StoryGroupUpdate(member_identifier="s2", added_at=datetime.now(UTC)),
+        ],
+    )
+    result = _deterministic_gate([candidate])
+    assert result.decision == "go"
+
+
+def test_deterministic_gate_returns_no_update_for_stale_update() -> None:
+    from app.newsroom.tools import _deterministic_gate
+
+    candidate = TeamUpdateCandidate(
+        story_id="s1", url="https://example.com/s1", title="Old follow-up",
+        source_name="ESPN", team_code="MIN", group_id="g1",
+        framing="update", continuity="follow_up_to_tracked_story",
+        recent_group_updates=[],
+    )
+    result = _deterministic_gate([candidate])
+    assert result.decision == "no_update"
+
+
+def test_team_update_batch_agent_nano_report_normalizes_full_team_name() -> None:
+    report = TeamUpdateBatchAgentNanoReport(
+        team="Arizona Cardinals",
+        lookback_minutes=180,
+        status="no_update",
+    )
+
+    assert report.team == "ARI"
+
+
 def test_team_update_workflow_builds_real_agent_instances(tmp_path: Path) -> None:
     story = make_story()
     workflow = build_workflow(
@@ -672,8 +825,8 @@ def test_team_update_workflow_builds_real_agent_instances(tmp_path: Path) -> Non
     assert workflow.article_lookup_tool.name == "lookup_article_content"
     assert workflow.article_data_tool.name == "digest_article_data"
     assert workflow.team_update_agent.name == "Team Update Agent"
-    assert workflow.team_update_tool.name == "build_team_update_package"
-    assert workflow.team_update_batch_agent.name == "Team Update Batch Agent"
+    assert not hasattr(workflow, "team_update_tool")
+    assert not hasattr(workflow, "team_update_batch_agent")
     assert workflow.hourly_narrative_planner_agent.name == "Hourly Narrative Planner Agent"
     assert workflow.radio_script_writer_agent.name == "Radio Script Writer Agent"
     assert workflow.radio_story_script_tool.name == "build_radio_story_script"
@@ -867,6 +1020,66 @@ def test_history_store_returns_latest_playlist_and_persists_story_scripts(tmp_pa
     assert scripts[0].script_run_id == "script-run-1"
     assert scripts[0].playlist_id == newer_playlist_id
     assert scripts[0].language == "en-US"
+
+
+def test_history_store_lists_story_script_batches_from_latest_run_per_batch(tmp_path: Path) -> None:
+    store = TeamUpdateHistoryStore(tmp_path / "history.sqlite3")
+    older_generated_at = datetime.now(UTC) - timedelta(hours=2)
+    batch_one_generated_at = datetime.now(UTC) - timedelta(hours=1)
+    batch_two_generated_at = datetime.now(UTC)
+
+    older_playlist_id = store.save_hourly_playlist(
+        batch_run_id="batch-1",
+        generated_at=older_generated_at,
+        lookback_minutes=60,
+        playlist=HourlyPlaylist(selected_count=0, items=[]),
+    )
+    batch_one_playlist_id = store.save_hourly_playlist(
+        batch_run_id="batch-1",
+        generated_at=batch_one_generated_at,
+        lookback_minutes=60,
+        playlist=HourlyPlaylist(selected_count=0, items=[]),
+    )
+    batch_two_playlist_id = store.save_hourly_playlist(
+        batch_run_id="batch-2",
+        generated_at=batch_two_generated_at,
+        lookback_minutes=60,
+        playlist=HourlyPlaylist(selected_count=0, items=[]),
+    )
+
+    store.save_story_scripts(
+        script_run_id="script-run-old",
+        playlist_id=older_playlist_id,
+        batch_run_id="batch-1",
+        generated_at=older_generated_at,
+        scripts=[make_radio_story_script(team="ARI")],
+    )
+    store.save_story_scripts(
+        script_run_id="script-run-new",
+        playlist_id=batch_one_playlist_id,
+        batch_run_id="batch-1",
+        generated_at=batch_one_generated_at,
+        scripts=[
+            make_radio_story_script(team="MIN", playlist_rank=1),
+            make_radio_story_script(team="BUF", playlist_rank=2),
+        ],
+    )
+    store.save_story_scripts(
+        script_run_id="script-run-batch-2",
+        playlist_id=batch_two_playlist_id,
+        batch_run_id="batch-2",
+        generated_at=batch_two_generated_at,
+        scripts=[make_radio_story_script(team="KC")],
+    )
+
+    batches = store.list_story_script_batches()
+
+    assert [entry.batch_run_id for entry in batches] == ["batch-2", "batch-1"]
+    assert batches[0].script_run_id == "script-run-batch-2"
+    assert batches[0].item_count == 1
+    assert batches[1].script_run_id == "script-run-new"
+    assert batches[1].playlist_id == batch_one_playlist_id
+    assert batches[1].item_count == 2
 
 
 def test_history_store_persists_hourly_narrative_plans(tmp_path: Path) -> None:
@@ -1135,6 +1348,32 @@ async def test_team_update_workflow_returns_no_update_when_group_has_no_recent_c
 
 
 @pytest.mark.asyncio
+async def test_team_update_workflow_drops_unusable_stored_article_content(
+    tmp_path: Path,
+) -> None:
+    story = make_story()
+    workflow = build_workflow(
+        tmp_path,
+        stories=[story],
+        article_lookup_responses={
+            story.url: make_article_lookup_response(
+                url=story.url,
+                group_id="group-1",
+                content="Subscribe now for the latest newsletter and cookie policy updates.",
+            )
+        },
+        group_update_responses={"group-1": make_group_updates_response(group_id="group-1")},
+    )
+
+    report = await workflow.run_team_update(build_context())
+
+    assert report.status == "no_update"
+    assert report.coverage.team_feed_stories == 1
+    assert report.coverage.candidate_stories == 0
+    assert any("Skipping unusable stored article content" in warning for warning in report.warnings)
+
+
+@pytest.mark.asyncio
 async def test_team_update_workflow_falls_back_to_article_updated_at_when_group_updates_are_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1158,30 +1397,32 @@ async def test_team_update_workflow_falls_back_to_article_updated_at_when_group_
     async def fake_runner(agent, message, **_kwargs):
         assert story.url in message
         return SimpleNamespace(
-            final_output=TeamUpdatePackage(
-                total_duration_seconds=180,
-                headline="Fallback headline",
-                topics=[
-                    make_topic(
-                        headline="Fallback topic",
-                        source_articles=[
-                            SourceArticleRef(
-                                story_id=story.id,
-                                url=story.url,
-                                title=story.title,
-                                source_name=story.source_name,
-                            )
-                        ],
-                    )
-                ],
-                source_articles=[
-                    SourceArticleRef(
-                        story_id=story.id,
-                        url=story.url,
-                        title=story.title,
-                        source_name=story.source_name,
-                    )
-                ],
+            final_output=make_team_update_agent_result(
+                report=TeamUpdatePackage(
+                    total_duration_seconds=180,
+                    headline="Fallback headline",
+                    topics=[
+                        make_topic(
+                            headline="Fallback topic",
+                            source_articles=[
+                                SourceArticleRef(
+                                    story_id=story.id,
+                                    url=story.url,
+                                    title=story.title,
+                                    source_name=story.source_name,
+                                )
+                            ],
+                        )
+                    ],
+                    source_articles=[
+                        SourceArticleRef(
+                            story_id=story.id,
+                            url=story.url,
+                            title=story.title,
+                            source_name=story.source_name,
+                        )
+                    ],
+                )
             )
         )
 
@@ -1211,31 +1452,33 @@ async def test_team_update_workflow_marks_new_candidate_without_history(
         nonlocal captured_message
         captured_message = message
         return SimpleNamespace(
-            final_output=TeamUpdatePackage(
-                total_duration_seconds=180,
-                headline="Minnesota update",
-                topics=[
-                    make_topic(
-                        headline="Roster update",
-                        editorial_angle="Fresh angle",
-                        source_articles=[
-                            SourceArticleRef(
-                                story_id=story.id,
-                                url=story.url,
-                                title=story.title,
-                                source_name=story.source_name,
-                            )
-                        ],
-                    )
-                ],
-                source_articles=[
-                    SourceArticleRef(
-                        story_id=story.id,
-                        url=story.url,
-                        title=story.title,
-                        source_name=story.source_name,
-                    )
-                ],
+            final_output=make_team_update_agent_result(
+                report=TeamUpdatePackage(
+                    total_duration_seconds=180,
+                    headline="Minnesota update",
+                    topics=[
+                        make_topic(
+                            headline="Roster update",
+                            editorial_angle="Fresh angle",
+                            source_articles=[
+                                SourceArticleRef(
+                                    story_id=story.id,
+                                    url=story.url,
+                                    title=story.title,
+                                    source_name=story.source_name,
+                                )
+                            ],
+                        )
+                    ],
+                    source_articles=[
+                        SourceArticleRef(
+                            story_id=story.id,
+                            url=story.url,
+                            title=story.title,
+                            source_name=story.source_name,
+                        )
+                    ],
+                )
             )
         )
 
@@ -1289,33 +1532,35 @@ async def test_team_update_workflow_marks_update_candidate_from_prior_group_hist
         nonlocal captured_message
         captured_message = message
         return SimpleNamespace(
-            final_output=TeamUpdatePackage(
-                total_duration_seconds=180,
-                headline="Updated headline",
-                topics=[
-                    make_topic(
-                        headline="Updated topic",
-                        framing="update",
-                        continuity="follow_up_to_tracked_story",
-                        what_changed="A related story was added to the same group in the last hour.",
-                        source_articles=[
-                            SourceArticleRef(
-                                story_id=story.id,
-                                url=story.url,
-                                title=story.title,
-                                source_name=story.source_name,
-                            )
-                        ],
-                    )
-                ],
-                source_articles=[
-                    SourceArticleRef(
-                        story_id=story.id,
-                        url=story.url,
-                        title=story.title,
-                        source_name=story.source_name,
-                    )
-                ],
+            final_output=make_team_update_agent_result(
+                report=TeamUpdatePackage(
+                    total_duration_seconds=180,
+                    headline="Updated headline",
+                    topics=[
+                        make_topic(
+                            headline="Updated topic",
+                            framing="update",
+                            continuity="follow_up_to_tracked_story",
+                            what_changed="A related story was added to the same group in the last hour.",
+                            source_articles=[
+                                SourceArticleRef(
+                                    story_id=story.id,
+                                    url=story.url,
+                                    title=story.title,
+                                    source_name=story.source_name,
+                                )
+                            ],
+                        )
+                    ],
+                    source_articles=[
+                        SourceArticleRef(
+                            story_id=story.id,
+                            url=story.url,
+                            title=story.title,
+                            source_name=story.source_name,
+                        )
+                    ],
+                )
             )
         )
 
@@ -1366,19 +1611,21 @@ async def test_team_update_workflow_marks_update_candidate_from_prior_url_histor
     async def fake_runner(agent, message, **_kwargs):
         assert '"matched_by":"url"' in message
         return SimpleNamespace(
-            final_output=TeamUpdatePackage(
-                total_duration_seconds=180,
-                headline="Repeated URL headline",
-                topics=[
-                    make_topic(
-                        headline="Repeated URL topic",
-                        framing="update",
-                        continuity="follow_up_to_tracked_story",
-                        what_changed="The same source URL has new same-hour related activity.",
-                        source_articles=[],
-                    )
-                ],
-                source_articles=[],
+            final_output=make_team_update_agent_result(
+                report=TeamUpdatePackage(
+                    total_duration_seconds=180,
+                    headline="Repeated URL headline",
+                    topics=[
+                        make_topic(
+                            headline="Repeated URL topic",
+                            framing="update",
+                            continuity="follow_up_to_tracked_story",
+                            what_changed="The same source URL has new same-hour related activity.",
+                            source_articles=[],
+                        )
+                    ],
+                    source_articles=[],
+                )
             )
         )
 
@@ -1387,6 +1634,37 @@ async def test_team_update_workflow_marks_update_candidate_from_prior_url_histor
     report = await workflow.run_team_update(build_context())
 
     assert report.coverage.update_candidates == 1
+
+
+@pytest.mark.asyncio
+async def test_team_update_workflow_allows_agent_to_return_no_update_with_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    story = make_story()
+    workflow = build_workflow(
+        tmp_path,
+        stories=[story],
+        article_lookup_responses={story.url: make_article_lookup_response(url=story.url, group_id="group-1")},
+        group_update_responses={"group-1": make_group_updates_response(group_id="group-1")},
+    )
+
+    async def fake_runner(agent, message, **_kwargs):
+        assert story.url in message
+        return SimpleNamespace(
+            final_output=make_team_update_agent_result(
+                status="no_update",
+                skip_reason="The candidate stories mention the team but do not contain a verifiable team-specific update.",
+            )
+        )
+
+    monkeypatch.setattr("app.newsroom.workflow_team_update.Runner.run", fake_runner)
+
+    report = await workflow.run_team_update(build_context())
+
+    assert report.status == "no_update"
+    assert report.report is None
+    assert report.coverage.candidate_stories == 1
 
 
 @pytest.mark.asyncio
@@ -1430,18 +1708,20 @@ async def test_team_update_workflow_marks_update_candidate_from_produced_history
     async def fake_runner(agent, message, **_kwargs):
         assert '"continuity":"follow_up_to_produced_story"' in message
         return SimpleNamespace(
-            final_output=TeamUpdatePackage(
-                total_duration_seconds=180,
-                headline="Produced follow-up",
-                topics=[
-                    make_topic(
-                        headline="Produced update topic",
-                        framing="update",
-                        continuity="follow_up_to_produced_story",
-                        what_changed="New same-group reporting advances an already aired storyline.",
-                    )
-                ],
-                source_articles=[],
+            final_output=make_team_update_agent_result(
+                report=TeamUpdatePackage(
+                    total_duration_seconds=180,
+                    headline="Produced follow-up",
+                    topics=[
+                        make_topic(
+                            headline="Produced update topic",
+                            framing="update",
+                            continuity="follow_up_to_produced_story",
+                            what_changed="New same-group reporting advances an already aired storyline.",
+                        )
+                    ],
+                    source_articles=[],
+                )
             )
         )
 
@@ -1479,11 +1759,13 @@ async def test_team_update_workflow_filters_to_requested_team_only(
     async def fake_runner(agent, message, **_kwargs):
         assert "Falcons story" not in message
         return SimpleNamespace(
-            final_output=TeamUpdatePackage(
-                total_duration_seconds=180,
-                headline="Team-only headline",
-                topics=[make_topic()],
-                source_articles=[],
+            final_output=make_team_update_agent_result(
+                report=TeamUpdatePackage(
+                    total_duration_seconds=180,
+                    headline="Team-only headline",
+                    topics=[make_topic()],
+                    source_articles=[],
+                )
             )
         )
 
@@ -1521,21 +1803,77 @@ async def test_team_update_end_to_end_persists_then_frames_followup_as_update(
         framing = "update" if '"framing":"update"' in message else "new"
         framings.append(framing)
         return SimpleNamespace(
-            final_output=TeamUpdatePackage(
+            final_output=make_team_update_agent_result(
+                report=TeamUpdatePackage(
+                    total_duration_seconds=180,
+                    headline=f"{framing} headline",
+                    topics=[
+                        make_topic(
+                            headline=f"{framing} topic",
+                            framing=framing,
+                            continuity=(
+                                "follow_up_to_tracked_story" if framing == "update" else "new_story"
+                            ),
+                            what_changed=(
+                                "A same-group follow-up item arrived in the last hour."
+                                if framing == "update"
+                                else None
+                            ),
+                            source_articles=[
+                                SourceArticleRef(
+                                    story_id=story.id,
+                                    url=story.url,
+                                    title=story.title,
+                                    source_name=story.source_name,
+                                )
+                            ],
+                        )
+                    ],
+                    source_articles=[
+                        SourceArticleRef(
+                            story_id=story.id,
+                            url=story.url,
+                            title=story.title,
+                            source_name=story.source_name,
+                        )
+                    ],
+                )
+            )
+        )
+
+    monkeypatch.setattr("app.newsroom.workflow_team_update.Runner.run", fake_runner)
+
+    first_report = await workflow.run_team_update(build_context())
+    second_report = await workflow.run_team_update(build_context())
+
+    assert first_report.status == "report_ready"
+    assert second_report.status == "report_ready"
+    assert framings == ["new", "update"]
+
+
+@pytest.mark.asyncio
+async def test_team_update_batch_dispatches_via_process_team_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    story = make_story()
+    workflow = build_workflow(
+        tmp_path,
+        stories=[story],
+        article_lookup_responses={story.url: make_article_lookup_response(url=story.url, group_id="group-1")},
+        group_update_responses={"group-1": make_group_updates_response(group_id="group-1")},
+    )
+    process_calls: list[str] = []
+
+    async def fake_process_team_update(*, team_input, team_update_agent, run_config):
+        process_calls.append(team_input.team_code)
+        return make_team_update_agent_result(
+            report=TeamUpdatePackage(
                 total_duration_seconds=180,
-                headline=f"{framing} headline",
+                headline="Batch headline",
                 topics=[
                     make_topic(
-                        headline=f"{framing} topic",
-                        framing=framing,
-                        continuity=(
-                            "follow_up_to_tracked_story" if framing == "update" else "new_story"
-                        ),
-                        what_changed=(
-                            "A same-group follow-up item arrived in the last hour."
-                            if framing == "update"
-                            else None
-                        ),
+                        headline="Batch topic",
                         source_articles=[
                             SourceArticleRef(
                                 story_id=story.id,
@@ -1554,79 +1892,10 @@ async def test_team_update_end_to_end_persists_then_frames_followup_as_update(
                         source_name=story.source_name,
                     )
                 ],
-            )
+            ),
         )
 
-    monkeypatch.setattr("app.newsroom.workflow_team_update.Runner.run", fake_runner)
-
-    first_report = await workflow.run_team_update(build_context())
-    second_report = await workflow.run_team_update(build_context())
-
-    assert first_report.status == "report_ready"
-    assert second_report.status == "report_ready"
-    assert framings == ["new", "update"]
-
-
-@pytest.mark.asyncio
-async def test_team_update_batch_uses_single_top_level_runner_call(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    story = make_story()
-    workflow = build_workflow(
-        tmp_path,
-        stories=[story],
-        article_lookup_responses={story.url: make_article_lookup_response(url=story.url, group_id="group-1")},
-        group_update_responses={"group-1": make_group_updates_response(group_id="group-1")},
-    )
-    calls: list[tuple[str, str | None, bool | None]] = []
-
-    async def fake_runner(agent, message, *, run_config=None, **_kwargs):
-        calls.append(
-            (
-                agent.name,
-                getattr(run_config, "group_id", None),
-                _kwargs.get("auto_previous_response_id"),
-            )
-        )
-        if agent.name == "Team Update Batch Agent":
-            assert "selected_teams" in message
-            return SimpleNamespace(
-                final_output=TeamUpdateBatchAgentResult(
-                    reports=[
-                        TeamUpdateBatchAgentReport(
-                            team="MIN",
-                            lookback_minutes=60,
-                            status="report_ready",
-                            report=TeamUpdatePackage(
-                                total_duration_seconds=180,
-                                headline="Batch headline",
-                                topics=[
-                                    make_topic(
-                                        headline="Batch topic",
-                                        source_articles=[
-                                            SourceArticleRef(
-                                                story_id=story.id,
-                                                url=story.url,
-                                                title=story.title,
-                                                source_name=story.source_name,
-                                            )
-                                        ],
-                                    )
-                                ],
-                                source_articles=[
-                                    SourceArticleRef(
-                                        story_id=story.id,
-                                        url=story.url,
-                                        title=story.title,
-                                        source_name=story.source_name,
-                                    )
-                                ],
-                            ),
-                        )
-                    ]
-                )
-            )
+    async def fake_runner(agent, message, **_kwargs):
         assert agent.name == "Hourly Playlist Orchestrator Agent"
         return SimpleNamespace(
             final_output=HourlyPlaylist(
@@ -1645,6 +1914,7 @@ async def test_team_update_batch_uses_single_top_level_runner_call(
             )
         )
 
+    monkeypatch.setattr("app.newsroom.workflow_team_update.process_team_update", fake_process_team_update)
     monkeypatch.setattr("app.newsroom.workflow_team_update.Runner.run", fake_runner)
 
     batch_response = await workflow.run_team_update_batch(
@@ -1655,10 +1925,7 @@ async def test_team_update_batch_uses_single_top_level_runner_call(
 
     assert len(batch_response.reports) == 1
     assert batch_response.hourly_playlist.selected_count == 1
-    assert calls == [
-        ("Team Update Batch Agent", "batch-run-1", True),
-        ("Hourly Playlist Orchestrator Agent", "batch-run-1", True),
-    ]
+    assert process_calls == ["MIN"]
 
 
 @pytest.mark.asyncio
@@ -1686,38 +1953,26 @@ async def test_team_update_batch_persists_all_reports_and_marks_playlist_selecti
         },
     )
 
-    async def fake_runner(agent, message, **_kwargs):
-        if agent.name == "Team Update Batch Agent":
-            return SimpleNamespace(
-                final_output=TeamUpdateBatchAgentResult(
-                    reports=[
-                        TeamUpdateBatchAgentReport(
-                            team="MIN",
-                            lookback_minutes=60,
-                            status="report_ready",
-                            report=TeamUpdatePackage(
-                                total_duration_seconds=180,
-                                headline="MIN package",
-                                topics=[make_topic(headline="MIN topic")],
-                                source_articles=[
-                                    SourceArticleRef(
-                                        story_id=min_story.id,
-                                        url=min_story.url,
-                                        title=min_story.title,
-                                        source_name=min_story.source_name,
-                                    )
-                                ],
-                            ),
-                        ),
-                        TeamUpdateBatchAgentReport(
-                            team="ATL",
-                            lookback_minutes=60,
-                            status="no_update",
-                        ),
-                    ]
-                )
+    async def fake_process_team_update(*, team_input, team_update_agent, run_config):
+        if team_input.team_code == "MIN":
+            return make_team_update_agent_result(
+                report=TeamUpdatePackage(
+                    total_duration_seconds=180,
+                    headline="MIN package",
+                    topics=[make_topic(headline="MIN topic")],
+                    source_articles=[
+                        SourceArticleRef(
+                            story_id=min_story.id,
+                            url=min_story.url,
+                            title=min_story.title,
+                            source_name=min_story.source_name,
+                        )
+                    ],
+                ),
             )
+        raise AssertionError(f"Unexpected team: {team_input.team_code}")
 
+    async def fake_runner(agent, message, **_kwargs):
         assert '"team":"MIN"' in message
         assert '"team":"ATL"' not in message
         assert '"eligible_reports"' in message
@@ -1738,6 +1993,7 @@ async def test_team_update_batch_persists_all_reports_and_marks_playlist_selecti
             )
         )
 
+    monkeypatch.setattr("app.newsroom.workflow_team_update.process_team_update", fake_process_team_update)
     monkeypatch.setattr("app.newsroom.workflow_team_update.Runner.run", fake_runner)
 
     batch_response = await workflow.run_team_update_batch(
@@ -1759,7 +2015,45 @@ async def test_team_update_batch_persists_all_reports_and_marks_playlist_selecti
 
 
 @pytest.mark.asyncio
-async def test_team_update_batch_normalizes_agent_report_order_to_input_order(
+async def test_team_update_batch_accepts_no_update_for_team_with_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    min_story = make_story(team_code="MIN")
+    workflow = build_workflow(
+        tmp_path,
+        stories=[min_story],
+        article_lookup_responses={
+            min_story.url: make_article_lookup_response(url=min_story.url, group_id="group-1"),
+        },
+        group_update_responses={
+            "group-1": make_group_updates_response(group_id="group-1"),
+        },
+    )
+
+    async def fake_process_team_update(*, team_input, team_update_agent, run_config):
+        return make_team_update_agent_result(
+            status="no_update",
+            skip_reason="Gate: material not airworthy",
+        )
+
+    monkeypatch.setattr("app.newsroom.workflow_team_update.process_team_update", fake_process_team_update)
+
+    batch_response = await workflow.run_team_update_batch(
+        run_id="batch-run-1",
+        generated_at=datetime.now(UTC),
+        request=TeamUpdateBatchRequest(teams=["MIN"], lookback_minutes=60),
+    )
+
+    stored_entries = workflow._history_store.list_batch_entries(batch_run_id="batch-run-1")
+
+    assert batch_response.reports[0].status == "no_update"
+    assert batch_response.hourly_playlist.selected_count == 0
+    assert stored_entries[0].production_status == "tracked_only"
+
+
+@pytest.mark.asyncio
+async def test_team_update_batch_preserves_input_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1783,51 +2077,26 @@ async def test_team_update_batch_normalizes_agent_report_order_to_input_order(
         },
     )
 
-    async def fake_runner(agent, _message, **_kwargs):
-        if agent.name == "Team Update Batch Agent":
-            return SimpleNamespace(
-                final_output=TeamUpdateBatchAgentResult(
-                    reports=[
-                        TeamUpdateBatchAgentReport(
-                            team="ATL",
-                            lookback_minutes=60,
-                            status="report_ready",
-                            report=TeamUpdatePackage(
-                                total_duration_seconds=180,
-                                headline="ATL package",
-                                topics=[make_topic(headline="ATL topic")],
-                                source_articles=[
-                                    SourceArticleRef(
-                                        story_id=atl_story.id,
-                                        url=atl_story.url,
-                                        title=atl_story.title,
-                                        source_name=atl_story.source_name,
-                                    )
-                                ],
-                            ),
-                        ),
-                        TeamUpdateBatchAgentReport(
-                            team="MIN",
-                            lookback_minutes=60,
-                            status="report_ready",
-                            report=TeamUpdatePackage(
-                                total_duration_seconds=180,
-                                headline="MIN package",
-                                topics=[make_topic(headline="MIN topic")],
-                                source_articles=[
-                                    SourceArticleRef(
-                                        story_id=min_story.id,
-                                        url=min_story.url,
-                                        title=min_story.title,
-                                        source_name=min_story.source_name,
-                                    )
-                                ],
-                            ),
-                        ),
-                    ]
-                )
-            )
+    async def fake_process_team_update(*, team_input, team_update_agent, run_config):
+        headline = f"{team_input.team_code} package"
+        story = min_story if team_input.team_code == "MIN" else atl_story
+        return make_team_update_agent_result(
+            report=TeamUpdatePackage(
+                total_duration_seconds=180,
+                headline=headline,
+                topics=[make_topic(headline=f"{team_input.team_code} topic")],
+                source_articles=[
+                    SourceArticleRef(
+                        story_id=story.id,
+                        url=story.url,
+                        title=story.title,
+                        source_name=story.source_name,
+                    )
+                ],
+            ),
+        )
 
+    async def fake_runner(agent, _message, **_kwargs):
         return SimpleNamespace(
             final_output=HourlyPlaylist(
                 selected_count=2,
@@ -1854,6 +2123,7 @@ async def test_team_update_batch_normalizes_agent_report_order_to_input_order(
             )
         )
 
+    monkeypatch.setattr("app.newsroom.workflow_team_update.process_team_update", fake_process_team_update)
     monkeypatch.setattr("app.newsroom.workflow_team_update.Runner.run", fake_runner)
 
     batch_response = await workflow.run_team_update_batch(
@@ -1866,7 +2136,7 @@ async def test_team_update_batch_normalizes_agent_report_order_to_input_order(
 
 
 @pytest.mark.asyncio
-async def test_team_update_batch_rejects_invalid_no_update_status(
+async def test_deterministic_batch_skips_teams_without_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1881,54 +2151,145 @@ async def test_team_update_batch_rejects_invalid_no_update_status(
             "group-1": make_group_updates_response(group_id="group-1"),
         },
     )
+    process_calls: list[str] = []
+
+    async def fake_process_team_update(*, team_input, team_update_agent, run_config):
+        process_calls.append(team_input.team_code)
+        return make_team_update_agent_result(
+            report=TeamUpdatePackage(
+                total_duration_seconds=180,
+                headline=f"{team_input.team_code} package",
+                topics=[make_topic()],
+                source_articles=[
+                    SourceArticleRef(
+                        story_id=min_story.id,
+                        url=min_story.url,
+                        title=min_story.title,
+                        source_name=min_story.source_name,
+                    )
+                ],
+            ),
+        )
 
     async def fake_runner(agent, _message, **_kwargs):
-        if agent.name == "Team Update Batch Agent":
-            return SimpleNamespace(
-                final_output=TeamUpdateBatchAgentResult(
-                    reports=[
-                        TeamUpdateBatchAgentReport(
-                            team="MIN",
-                            lookback_minutes=60,
-                            status="report_ready",
-                            report=TeamUpdatePackage(
-                                total_duration_seconds=180,
-                                headline="MIN package",
-                                topics=[make_topic(headline="MIN topic")],
-                                source_articles=[
-                                    SourceArticleRef(
-                                        story_id=min_story.id,
-                                        url=min_story.url,
-                                        title=min_story.title,
-                                        source_name=min_story.source_name,
-                                    )
-                                ],
-                            ),
-                        ),
-                        TeamUpdateBatchAgentReport(
-                            team="ATL",
-                            lookback_minutes=60,
-                            status="report_ready",
-                            report=TeamUpdatePackage(
-                                total_duration_seconds=180,
-                                headline="ATL package",
-                                topics=[make_topic(headline="ATL topic")],
-                                source_articles=[],
-                            ),
-                        ),
-                    ]
-                )
+        return SimpleNamespace(
+            final_output=HourlyPlaylist(
+                selected_count=1,
+                items=[
+                    HourlyPlaylistItem(
+                        rank=1,
+                        team="MIN",
+                        headline="MIN package",
+                        framing="new",
+                        continuity="new_story",
+                        production_reason="Lead.",
+                        source_articles=[],
+                    )
+                ],
             )
-        raise AssertionError("Hourly playlist should not run when batch validation fails.")
+        )
 
+    monkeypatch.setattr("app.newsroom.workflow_team_update.process_team_update", fake_process_team_update)
     monkeypatch.setattr("app.newsroom.workflow_team_update.Runner.run", fake_runner)
 
-    with pytest.raises(ValueError, match="expected no_update"):
-        await workflow.run_team_update_batch(
-            run_id="batch-run-1",
-            generated_at=datetime.now(UTC),
-            request=TeamUpdateBatchRequest(teams=["MIN", "ATL"], lookback_minutes=60),
+    batch_response = await workflow.run_team_update_batch(
+        run_id="batch-run-1",
+        generated_at=datetime.now(UTC),
+        request=TeamUpdateBatchRequest(teams=["MIN", "ATL"], lookback_minutes=60),
+    )
+
+    # ATL has no candidates → process_team_update should NOT be called for ATL
+    assert process_calls == ["MIN"]
+    # ATL should still appear in reports as no_update
+    atl_report = next(r for r in batch_response.reports if r.team == "ATL")
+    assert atl_report.status == "no_update"
+
+
+@pytest.mark.asyncio
+async def test_deterministic_batch_dispatches_all_teams_in_parallel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    min_story = make_story(team_code="MIN")
+    kc_story = make_story(
+        story_id="story-2",
+        url="https://example.com/story-2",
+        title="Chiefs update",
+        team_code="KC",
+    )
+    workflow = build_workflow(
+        tmp_path,
+        stories=[min_story, kc_story],
+        article_lookup_responses={
+            min_story.url: make_article_lookup_response(url=min_story.url, group_id="group-1"),
+            kc_story.url: make_article_lookup_response(url=kc_story.url, group_id="group-2"),
+        },
+        group_update_responses={
+            "group-1": make_group_updates_response(group_id="group-1"),
+            "group-2": make_group_updates_response(group_id="group-2"),
+        },
+    )
+    process_calls: list[str] = []
+
+    async def fake_process_team_update(*, team_input, team_update_agent, run_config):
+        process_calls.append(team_input.team_code)
+        story = min_story if team_input.team_code == "MIN" else kc_story
+        return make_team_update_agent_result(
+            report=TeamUpdatePackage(
+                total_duration_seconds=180,
+                headline=f"{team_input.team_code} package",
+                topics=[make_topic()],
+                source_articles=[
+                    SourceArticleRef(
+                        story_id=story.id,
+                        url=story.url,
+                        title=story.title,
+                        source_name=story.source_name,
+                    )
+                ],
+            ),
         )
+
+    async def fake_runner(agent, _message, **_kwargs):
+        return SimpleNamespace(
+            final_output=HourlyPlaylist(
+                selected_count=2,
+                items=[
+                    HourlyPlaylistItem(
+                        rank=1,
+                        team="MIN",
+                        headline="MIN package",
+                        framing="new",
+                        continuity="new_story",
+                        production_reason="Lead.",
+                        source_articles=[],
+                    ),
+                    HourlyPlaylistItem(
+                        rank=2,
+                        team="KC",
+                        headline="KC package",
+                        framing="new",
+                        continuity="new_story",
+                        production_reason="Second.",
+                        source_articles=[],
+                    ),
+                ],
+            )
+        )
+
+    monkeypatch.setattr("app.newsroom.workflow_team_update.process_team_update", fake_process_team_update)
+    monkeypatch.setattr("app.newsroom.workflow_team_update.Runner.run", fake_runner)
+
+    batch_response = await workflow.run_team_update_batch(
+        run_id="batch-run-1",
+        generated_at=datetime.now(UTC),
+        request=TeamUpdateBatchRequest(teams=["MIN", "KC"], lookback_minutes=60),
+    )
+
+    # Both teams with candidates should be dispatched (no chunking)
+    assert sorted(process_calls) == ["KC", "MIN"]
+    assert len(batch_response.reports) == 2
+    assert all(r.status == "report_ready" for r in batch_response.reports)
 
 
 @pytest.mark.asyncio
@@ -2300,6 +2661,96 @@ async def test_hourly_playlist_scripts_skip_tts_when_disabled(
     assert tts_batch.create_calls == []
     assert tts_batch.status_calls == []
     assert tts_batch.process_calls == []
+
+
+@pytest.mark.asyncio
+async def test_hourly_playlist_scripts_emit_progress_logs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    workflow = build_workflow(
+        tmp_path,
+        stories=[],
+        article_lookup_responses={},
+        group_update_responses={},
+    )
+    generated_at = datetime.now(UTC)
+    playlist_id = workflow._history_store.save_hourly_playlist(
+        batch_run_id="batch-run-1",
+        generated_at=generated_at,
+        lookback_minutes=60,
+        playlist=HourlyPlaylist(
+            selected_count=1,
+            items=[
+                HourlyPlaylistItem(
+                    rank=1,
+                    team="MIN",
+                    headline="Playlist headline",
+                    framing="new",
+                    continuity="new_story",
+                    production_reason="Lead item.",
+                    source_articles=[],
+                )
+            ],
+        ),
+    )
+    workflow._history_store.save_report(
+        report=TeamUpdateReport(
+            run_id="batch-run-1",
+            generated_at=generated_at,
+            team="MIN",
+            lookback_minutes=60,
+            status="report_ready",
+            report=TeamUpdatePackage(
+                total_duration_seconds=180,
+                headline="Playlist headline",
+                topics=[make_topic()],
+                source_articles=[],
+            ),
+            coverage={},
+            warnings=[],
+        ),
+        batch_run_id="batch-run-1",
+        source_story_ids=["story-1"],
+        source_urls=["https://example.com/story-1"],
+        source_group_ids=["group-1"],
+        production_status="put_to_production",
+        production_rank=1,
+        playlist_id=playlist_id,
+    )
+
+    async def fake_runner(agent, _message, **_kwargs):
+        if agent.name == "Hourly Narrative Planner Agent":
+            return SimpleNamespace(final_output=make_narrative_plan_output())
+        return SimpleNamespace(final_output={"scripts": [make_radio_story_script().model_dump(mode="json")]})
+
+    monkeypatch.setattr("app.newsroom.workflow_team_update.Runner.run", fake_runner)
+    caplog.set_level(logging.INFO, logger="app.newsroom.workflow_team_update")
+
+    response = await workflow.run_hourly_playlist_scripts(
+        script_run_id="script-run-logs",
+        generated_at=generated_at,
+        request=HourlyPlaylistScriptsRequest(enable_tts=False),
+    )
+
+    assert response.playlist_id == playlist_id
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Starting hourly playlist script generation" in message for message in messages)
+    assert any("Running hourly narrative planner" in message for message in messages)
+    assert any("Generating script chunk 1/1" in message for message in messages)
+    assert any("Saved 1 generated scripts" in message for message in messages)
+    assert any("Skipping TTS batch generation" in message for message in messages)
+    assert any("Completed hourly playlist script generation" in message for message in messages)
+
+    start_record = next(
+        record
+        for record in caplog.records
+        if "Starting hourly playlist script generation" in record.getMessage()
+    )
+    assert start_record.run_id == "script-run-logs"
+    assert start_record.language == "en-US"
+    assert start_record.story_count == 1
 
 
 @pytest.mark.asyncio

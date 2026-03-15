@@ -237,6 +237,40 @@ class UsageTelemetrySnapshot(BaseModel):
     applied_filters: dict[str, str | None] = Field(default_factory=dict)
 
 
+class UsageTelemetryComparisonDelta(BaseModel):
+    requests: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0
+    reasoning_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+
+
+class UsageTelemetryComparison(BaseModel):
+    status: Literal["ok"]
+    telemetry_enabled: bool
+    export_configured: bool
+    generated_at: datetime
+    left: UsageTelemetrySnapshot
+    right: UsageTelemetrySnapshot
+    delta: UsageTelemetryComparisonDelta = Field(default_factory=UsageTelemetryComparisonDelta)
+
+
+class UsageTelemetryRunSummary(BaseModel):
+    run_id: str
+    workflow: str
+    finished_at: datetime
+
+
+class UsageTelemetryRunSummaryResponse(BaseModel):
+    status: Literal["ok"]
+    telemetry_enabled: bool
+    export_configured: bool
+    generated_at: datetime
+    runs: list[UsageTelemetryRunSummary] = Field(default_factory=list)
+
+
 class StoredArticleRecord(BaseModel):
     url: str
     cite_url: str | None = None
@@ -346,6 +380,32 @@ class TeamUpdatePackage(BaseModel):
         return self
 
 
+class TeamUpdatePackageTransport(BaseModel):
+    total_duration_seconds: int = Field(default=180, ge=1)
+    headline: str
+    topics: list[TeamUpdateTopic] = Field(default_factory=list)
+    source_articles: list[SourceArticleRef] = Field(default_factory=list)
+
+
+class TeamUpdateGateResult(BaseModel):
+    decision: Literal["go", "no_update"]
+    skip_reason: str | None = None
+
+
+class TeamUpdateAgentResult(BaseModel):
+    status: Literal["report_ready", "no_update"]
+    report: TeamUpdatePackage | None = None
+    skip_reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_report_status(self) -> "TeamUpdateAgentResult":
+        if self.status == "report_ready" and self.report is None:
+            raise ValueError("report is required when status=report_ready")
+        if self.status == "no_update":
+            self.report = None
+        return self
+
+
 class TeamUpdateCoverage(BaseModel):
     total_feed_stories: int = Field(default=0, ge=0)
     team_feed_stories: int = Field(default=0, ge=0)
@@ -425,8 +485,47 @@ class TeamUpdateBatchAgentReport(BaseModel):
         return self
 
 
+class TeamUpdateBatchAgentTransportReport(BaseModel):
+    team: str
+    lookback_minutes: int = Field(ge=1, le=10080)
+    status: Literal["report_ready", "no_update"]
+    report: TeamUpdatePackageTransport | None = None
+
+    @field_validator("team")
+    @classmethod
+    def normalize_team(cls, value: str) -> str:
+        return TeamUpdateReportRequest(team=value).team
+
+    @model_validator(mode="after")
+    def validate_report_status(self) -> "TeamUpdateBatchAgentTransportReport":
+        if self.status == "report_ready" and self.report is None:
+            raise ValueError("report is required when status=report_ready")
+        if self.status == "no_update":
+            self.report = None
+        return self
+
+
 class TeamUpdateBatchAgentResult(BaseModel):
     reports: list[TeamUpdateBatchAgentReport] = Field(default_factory=list)
+
+
+class TeamUpdateBatchAgentTransportResult(BaseModel):
+    reports: list[TeamUpdateBatchAgentTransportReport] = Field(default_factory=list)
+
+
+class TeamUpdateBatchAgentNanoReport(BaseModel):
+    team: str
+    lookback_minutes: int = Field(ge=1, le=10080)
+    status: Literal["report_ready", "no_update"]
+
+    @field_validator("team")
+    @classmethod
+    def normalize_team(cls, value: str) -> str:
+        return TeamUpdateReportRequest(team=value).team
+
+
+class TeamUpdateBatchAgentNanoResult(BaseModel):
+    reports: list[TeamUpdateBatchAgentNanoReport] = Field(default_factory=list)
 
 
 class HourlyPlaylistItem(BaseModel):
@@ -793,15 +892,28 @@ class QAPlayerFeedItem(BaseModel):
     script_text: str = ""
 
 
+class QAPlayerBatchOption(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    batch_id: str
+    generated_at: datetime
+    script_run_id: str = ""
+    playlist_id: str = ""
+    language: ScriptLanguage = DEFAULT_SCRIPT_LANGUAGE
+    item_count: int = Field(default=0, ge=0)
+
+
 class QAPlayerFeed(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source: Literal["artifact", "history", "empty"]
     generated_at: datetime | None = None
+    selected_batch: str = ""
     script_run_id: str = ""
     playlist_id: str = ""
     language: ScriptLanguage = DEFAULT_SCRIPT_LANGUAGE
     has_audio: bool = False
+    available_batches: list[QAPlayerBatchOption] = Field(default_factory=list)
     items: list[QAPlayerFeedItem] = Field(default_factory=list)
 
 
@@ -1002,6 +1114,15 @@ class HourlyStoryScriptHistoryEntry(BaseModel):
     generated_at: datetime
     duration_seconds: int = Field(ge=1, le=240)
     script_json: dict
+
+
+class HourlyStoryScriptBatchHistoryEntry(BaseModel):
+    batch_run_id: str
+    script_run_id: str
+    playlist_id: str
+    language: ScriptLanguage = DEFAULT_SCRIPT_LANGUAGE
+    generated_at: datetime
+    item_count: int = Field(ge=0)
 
 
 class HourlyNarrativePlanHistoryEntry(BaseModel):

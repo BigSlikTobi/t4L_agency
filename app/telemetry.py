@@ -316,6 +316,38 @@ class UsageSnapshotStore:
                 "applied_filters": self._filter_payload(from_time=from_time, to_time=to_time, run_id=run_id),
             }
 
+    def list_historical_runs(
+        self,
+        *,
+        enabled: bool,
+        export_configured: bool,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        if self._db_path is not None:
+            return self._db_historical_runs(enabled=enabled, export_configured=export_configured, limit=limit)
+
+        with self._lock:
+            active_run_ids = set(self._active_runs.keys())
+            grouped: dict[str, dict[str, Any]] = {}
+            for event in self._recent_events:
+                if event.run_id in active_run_ids:
+                    continue
+                row = grouped.get(event.run_id)
+                if row is None or event.occurred_at > row["finished_at"]:
+                    grouped[event.run_id] = {
+                        "run_id": event.run_id,
+                        "workflow": event.workflow,
+                        "finished_at": event.occurred_at,
+                    }
+            runs = sorted(grouped.values(), key=lambda item: item["finished_at"], reverse=True)[:limit]
+            return {
+                "status": "ok",
+                "telemetry_enabled": enabled,
+                "export_configured": export_configured,
+                "generated_at": datetime.now(UTC),
+                "runs": runs,
+            }
+
     def _db_snapshot(
         self,
         *,
@@ -456,6 +488,46 @@ class UsageSnapshotStore:
                 for row in event_rows
             ],
             "applied_filters": self._filter_payload(from_time=from_time, to_time=to_time, run_id=run_id),
+        }
+
+    def _db_historical_runs(
+        self,
+        *,
+        enabled: bool,
+        export_configured: bool,
+        limit: int,
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    usage_events.run_id AS run_id,
+                    usage_events.workflow AS workflow,
+                    MAX(usage_events.occurred_at) AS finished_at
+                FROM usage_events
+                LEFT JOIN usage_active_runs
+                    ON usage_active_runs.run_id = usage_events.run_id
+                WHERE usage_active_runs.run_id IS NULL
+                GROUP BY usage_events.run_id, usage_events.workflow
+                ORDER BY finished_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+        return {
+            "status": "ok",
+            "telemetry_enabled": enabled,
+            "export_configured": export_configured,
+            "generated_at": datetime.now(UTC),
+            "runs": [
+                {
+                    "run_id": row["run_id"],
+                    "workflow": row["workflow"],
+                    "finished_at": datetime.fromisoformat(row["finished_at"]),
+                }
+                for row in rows
+            ],
         }
 
     def _initialize_db(self) -> None:
@@ -724,6 +796,53 @@ class TelemetryManager:
             from_time=from_time,
             to_time=to_time,
             run_id=run_id,
+        )
+
+    def dashboard_comparison(
+        self,
+        *,
+        left_run_id: str,
+        right_run_id: str,
+    ) -> dict[str, Any]:
+        left_snapshot = self.dashboard_snapshot(run_id=left_run_id.strip())
+        right_snapshot = self.dashboard_snapshot(run_id=right_run_id.strip())
+        left_totals = left_snapshot["totals"]
+        right_totals = right_snapshot["totals"]
+        return {
+            "status": "ok",
+            "telemetry_enabled": self.enabled,
+            "export_configured": self.export_configured,
+            "generated_at": datetime.now(UTC),
+            "left": left_snapshot,
+            "right": right_snapshot,
+            "delta": {
+                "requests": int(right_totals["requests"]) - int(left_totals["requests"]),
+                "input_tokens": int(right_totals["input_tokens"]) - int(left_totals["input_tokens"]),
+                "output_tokens": int(right_totals["output_tokens"]) - int(left_totals["output_tokens"]),
+                "cached_input_tokens": int(right_totals["cached_input_tokens"]) - int(
+                    left_totals["cached_input_tokens"]
+                ),
+                "reasoning_tokens": int(right_totals["reasoning_tokens"]) - int(left_totals["reasoning_tokens"]),
+                "total_tokens": int(right_totals["total_tokens"]) - int(left_totals["total_tokens"]),
+                "estimated_cost_usd": float(right_totals["estimated_cost_usd"]) - float(
+                    left_totals["estimated_cost_usd"]
+                ),
+            },
+        }
+
+    def dashboard_historical_runs(self, *, limit: int = 200) -> dict[str, Any]:
+        if self.snapshot_store is None:
+            return {
+                "status": "ok",
+                "telemetry_enabled": self.enabled,
+                "export_configured": self.export_configured,
+                "generated_at": datetime.now(UTC),
+                "runs": [],
+            }
+        return self.snapshot_store.list_historical_runs(
+            enabled=self.enabled,
+            export_configured=self.export_configured,
+            limit=limit,
         )
 
     def record_external_usage(

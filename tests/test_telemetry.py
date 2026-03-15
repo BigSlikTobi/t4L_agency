@@ -477,3 +477,83 @@ def test_telemetry_manager_records_external_usage(tmp_path: Path) -> None:
     assert snapshot["usage_by_model"][0]["key"] == "gemini-2.5-pro-preview-tts"
     assert snapshot["recent_events"][0]["provider"] == "google"
     manager.close()
+
+
+def test_telemetry_manager_builds_run_comparison(tmp_path: Path) -> None:
+    manager = configure_telemetry(
+        build_settings(
+            telemetry_enabled=True,
+            team_update_history_sqlite_path=tmp_path / "team_update_history.sqlite3",
+        )
+    )
+
+    manager.record_external_usage(
+        workflow="NFL Radio Agency",
+        run_id="run-a",
+        stage="team_update_batch_agent",
+        agent_name="Batch Agent",
+        provider="openai",
+        model="gpt-5-mini-2025-08-07",
+        requests=1,
+        input_tokens=100,
+        output_tokens=20,
+        total_tokens=120,
+    )
+    manager.record_external_usage(
+        workflow="NFL Radio Agency",
+        run_id="run-b",
+        stage="team_update_batch_agent",
+        agent_name="Batch Agent",
+        provider="openai",
+        model="gpt-5-mini-2025-08-07",
+        requests=2,
+        input_tokens=140,
+        output_tokens=30,
+        total_tokens=170,
+    )
+
+    comparison = manager.dashboard_comparison(left_run_id="run-a", right_run_id="run-b")
+    assert comparison["left"]["applied_filters"]["run_id"] == "run-a"
+    assert comparison["right"]["applied_filters"]["run_id"] == "run-b"
+    assert comparison["delta"]["requests"] == 1
+    assert comparison["delta"]["total_tokens"] == 50
+    manager.close()
+
+
+def test_telemetry_manager_lists_historical_runs_by_finish_time(tmp_path: Path) -> None:
+    manager = configure_telemetry(
+        build_settings(
+            telemetry_enabled=True,
+            team_update_history_sqlite_path=tmp_path / "team_update_history.sqlite3",
+        )
+    )
+
+    manager.record_external_usage(
+        workflow="NFL Radio Agency",
+        run_id="run-a",
+        stage="team_update_batch_agent",
+        agent_name="Batch Agent",
+        provider="openai",
+        model="gpt-5-mini-2025-08-07",
+        requests=1,
+        input_tokens=100,
+        output_tokens=20,
+        total_tokens=120,
+    )
+    manager.record_external_usage(
+        workflow="NFL Radio Agency",
+        run_id="run-b",
+        stage="team_update_batch_agent",
+        agent_name="Batch Agent",
+        provider="openai",
+        model="gpt-5-mini-2025-08-07",
+        requests=1,
+        input_tokens=120,
+        output_tokens=25,
+        total_tokens=145,
+    )
+
+    runs = manager.dashboard_historical_runs(limit=10)
+    assert [item["run_id"] for item in runs["runs"]] == ["run-b", "run-a"]
+    assert runs["runs"][0]["finished_at"] >= runs["runs"][1]["finished_at"]
+    manager.close()

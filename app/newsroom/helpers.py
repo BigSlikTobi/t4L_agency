@@ -48,6 +48,15 @@ from app.schemas import (
 
 T = TypeVar("T")
 
+_ARTICLE_TRUNCATION_WORD_LIMIT: int = 600
+
+
+def truncate_article_content(content: str, *, word_limit: int = _ARTICLE_TRUNCATION_WORD_LIMIT) -> str:
+    words = content.split(maxsplit=word_limit)
+    if len(words) <= word_limit:
+        return content
+    return " ".join(words[:word_limit]) + " [truncated]"
+
 
 def selected_teams(request: RadioRundownRequest) -> dict[str, dict[str, object]]:
     if request.teams is None:
@@ -214,7 +223,8 @@ def build_team_update_input(
         "candidate_stories": [_compact_candidate(candidate) for candidate in candidate_stories],
     }
     return (
-        "Create a 3-minute NFL team update report from these vetted candidate stories.\n\n"
+        "Create a 3-minute NFL team update report from these vetted candidate stories, or return "
+        "no_update when they do not support a concrete, team-specific, verifiable on-air update.\n\n"
         f"Input JSON:\n{json.dumps(payload, separators=(',', ':'))}"
     )
 
@@ -521,6 +531,53 @@ async def extract_json_output(run_result: Any) -> str:
     if isinstance(output, str):
         return output
     return json.dumps(output)
+
+
+def coerce_response_output(response: Any, schema: type[T]) -> T:
+    if not any(hasattr(response, attr) for attr in ("output_parsed", "output_text", "output")):
+        return coerce_output(response, schema)
+
+    parsed_output = getattr(response, "output_parsed", None)
+    if parsed_output is not None:
+        return coerce_output(parsed_output, schema)
+
+    output_text = getattr(response, "output_text", None)
+    if isinstance(output_text, str) and output_text.strip():
+        return coerce_output(output_text, schema)
+
+    output_items = getattr(response, "output", None)
+    if isinstance(output_items, list):
+        refusal_texts: list[str] = []
+        for item in output_items:
+            if getattr(item, "type", None) != "message":
+                continue
+            for content in getattr(item, "content", []):
+                content_type = getattr(content, "type", None)
+                if content_type == "output_text":
+                    text = getattr(content, "text", None)
+                    if isinstance(text, str) and text.strip():
+                        return coerce_output(text, schema)
+                elif content_type == "refusal":
+                    refusal = getattr(content, "refusal", None)
+                    if isinstance(refusal, str) and refusal.strip():
+                        refusal_texts.append(refusal.strip())
+        if refusal_texts:
+            raise ValueError(
+                f"Responses API refused to return {schema.__name__}: {refusal_texts[0]}"
+            )
+
+    details: list[str] = []
+    status = getattr(response, "status", None)
+    if status is not None:
+        details.append(f"status={status}")
+    error = getattr(response, "error", None)
+    if error is not None:
+        details.append(f"error={error}")
+    incomplete_details = getattr(response, "incomplete_details", None)
+    if incomplete_details is not None:
+        details.append(f"incomplete_details={incomplete_details}")
+    suffix = f" ({', '.join(details)})" if details else ""
+    raise ValueError(f"Responses API returned no structured output for {schema.__name__}{suffix}")
 
 
 def coerce_output(payload: Any, schema: type[T]) -> T:
